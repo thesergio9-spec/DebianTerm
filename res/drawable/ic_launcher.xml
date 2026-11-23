@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Dark terminal background rounded square -->
+    <path
+        android:fillColor="#0D1117"
+        android:pathData="M20,8 L88,8 A12,12 0 0,1 100,20 L100,88 A12,12 0 0,1 88,100 L20,100 A12,12 0 0,1 8,88 L8,20 A12,12 0 0,1 20,8 Z" />
+
+    <!-- Crimson Debian accent border -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#D70A53"
+        android:strokeWidth="4"
+        android:pathData="M20,10 L88,10 A10,10 0 0,1 98,20 L98,88 A10,10 0 0,1 88,98 L20,98 A10,10 0 0,1 10,88 L10,20 A10,10 0 0,1 20,10 Z" />
+
+    <!-- Top bar dot accents -->
+    <path
+        android:fillColor="#D70A53"
+        android:pathData="M24,24 m-3.5,0 a3.5,3.5 0 1,0 7,0 a3.5,3.5 0 1,0 -7,0" />
+    <path
+        android:fillColor="#E3B341"
+        android:pathData="M35,24 m-3.5,0 a3.5,3.5 0 1,0 7,0 a3.5,3.5 0 1,0 -7,0" />
+    <path
+        android:fillColor="#3FB950"
+        android:pathData="M46,24 m-3.5,0 a3.5,3.5 0 1,0 7,0 a3.5,3.5 0 1,0 -7,0" />
+
+    <!-- Prompt ">" symbol -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#D70A53"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:strokeWidth="7"
+        android:pathData="M28,46 L48,60 L28,74" />
+
+    <!-- Cursor "_" symbol -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#E6EDF3"
+        android:strokeLineCap="round"
+        android:strokeWidth="7"
+        android:pathData="M56,74 L78,74" />
+</vector>

@@ -1,0 +1,8 @@
+# Build artifacts
+build/
+*.keystore
+
+# Temporary files
+*.tmp
+*.log
+.DS_Store

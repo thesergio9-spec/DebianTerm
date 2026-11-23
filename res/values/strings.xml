@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">DebianTerm</string>
+
+    <!-- Required by com.termux.view.textselection.TextSelectionCursorController -->
+    <string name="copy_text">Copiar</string>
+    <string name="paste_text">Pegar</string>
+    <string name="text_selection_more">Más</string>
+
+    <string name="notification_channel_name">Sesiones DebianTerm</string>
+    <string name="notification_title">DebianTerm activo</string>
+    <string name="action_exit">Salir</string>
+    <string name="action_wake_lock">Wake Lock</string>
+</resources>
