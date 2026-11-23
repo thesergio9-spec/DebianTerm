@@ -19,10 +19,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public final class ChrootManager {
 
     private static final String[] SU_CANDIDATES = {
+        "/debug_ramdisk/su",
         "/system/bin/su",
         "/system/xbin/su",
         "/sbin/su",
-        "/debug_ramdisk/su",
         "/data/adb/ksu/bin/su",
         "/data/adb/ap/bin/su"
     };
@@ -66,14 +66,13 @@ public final class ChrootManager {
     }
 
     public static String resolveWorkingSuPath() {
-        // Prefer PATH "su" first, then explicit candidate locations.
-        if (testSuBinary("su")) {
-            return "su";
-        }
         for (String candidate : SU_CANDIDATES) {
             if (testSuBinary(candidate)) {
                 return candidate;
             }
+        }
+        if (testSuBinary("su")) {
+            return "su";
         }
         return detectSuPath();
     }
@@ -92,6 +91,15 @@ public final class ChrootManager {
         return execWithBinary(suBin, mountMaster, cmd, timeoutSec);
     }
 
+    private static ProcessBuilder createProcessBuilder(List<String> args) {
+        ProcessBuilder pb = new ProcessBuilder(args);
+        java.util.Map<String, String> env = pb.environment();
+        String currentPath = env.get("PATH");
+        String extendedPath = "/debug_ramdisk:/sbin:/system/bin:/system/xbin" + (currentPath != null ? ":" + currentPath : "");
+        env.put("PATH", extendedPath);
+        return pb;
+    }
+
     public static ExecResult execWithBinary(String suBin, boolean mountMaster, String cmd, int timeoutSec) {
         List<String> args = new ArrayList<>();
         args.add(suBin);
@@ -103,7 +111,7 @@ public final class ChrootManager {
 
         Process process = null;
         try {
-            process = new ProcessBuilder(args).start();
+            process = createProcessBuilder(args).start();
             return waitAndCollect(process, null, timeoutSec);
         } catch (IOException e) {
             if (mountMaster) {
@@ -121,7 +129,7 @@ public final class ChrootManager {
         args.add(cmd);
 
         try {
-            Process process = new ProcessBuilder(args).start();
+            Process process = createProcessBuilder(args).start();
             return waitAndCollect(process, stdinBytes, timeoutSec);
         } catch (IOException e) {
             return new ExecResult(-1, "", e.getMessage());
@@ -233,7 +241,9 @@ public final class ChrootManager {
             "  echo \"VER=$(cat " + qChroot + "/etc/debian_version 2>/dev/null | head -n 1)\"; " +
             "else echo 'ROOTFS=0'; fi; " +
             "if [ -x " + qScript + " ]; then echo 'SCRIPT=1'; else echo 'SCRIPT=0'; fi; " +
-            "du -sh " + qChroot + " 2>/dev/null | awk '{print \"SIZE=\" $1}' || true";
+            "if [ -d " + qChroot + " ] && [ " + qChroot + " != '/' ] && [ " + qChroot + " != '/data' ]; then " +
+            "  du -sh " + qChroot + " 2>/dev/null | awk '{print \"SIZE=\" $1}' || true; " +
+            "fi";
 
         ExecResult probe = execWithBinary(suBin, false, probeCmd, 10);
         String pretty = "";

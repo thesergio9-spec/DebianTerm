@@ -127,21 +127,22 @@ public final class DebianTermService extends Service {
     public TerminalSession createDebianSession(String chrootPath, String scriptPath, TerminalSessionClient client) {
         ensureForegroundStarted();
         String suBin = ChrootManager.resolveWorkingSuPath();
-        String qSu = ChrootManager.shellQuote(suBin);
         String qScript = ChrootManager.shellQuote(scriptPath);
         String qChroot = ChrootManager.shellQuote(chrootPath);
 
-        String shCmd =
+        // Se ejecuta directamente dentro de root (su) para no ser bloqueado por SELinux untrusted_app
+        String rootCmd =
             "if [ -x " + qScript + " ]; then " +
-            "  exec " + qSu + " -c " + qScript + "; " +
+            "  exec " + qScript + "; " +
             "elif [ -x " + qChroot + "/bin/bash ]; then " +
-            "  echo 'Aviso: script de arranque no encontrado en " + scriptPath + ", entrando directamente al chroot...'; " +
-            "  exec " + qSu + " -c " + ChrootManager.shellQuote("chroot " + chrootPath + " /bin/bash -l") + "; " +
+            "  echo 'Aviso: script no encontrado en " + scriptPath + ", arrancando Debian directamente...'; " +
+            "  exec chroot " + qChroot + " /bin/bash -l; " +
             "else " +
             "  echo 'Chroot Debian no encontrado en " + chrootPath + ". Usa el panel Chroot para instalarlo.'; " +
             "  exec /system/bin/sh; " +
             "fi";
 
+        String shCmd = "exec " + ChrootManager.shellQuote(suBin) + " -c " + ChrootManager.shellQuote(rootCmd);
         return createRawSession("/system/bin/sh", shCmd, "Debian #" + (++mSessionCounter), client);
     }
 
@@ -160,7 +161,7 @@ public final class DebianTermService extends Service {
             "COLORTERM=truecolor",
             "LANG=C.UTF-8",
             "HOME=" + cwd,
-            "PATH=/product/bin:/apex/com.android.runtime/bin:/apex/com.android.art/bin:/system_ext/bin:/system/bin:/system/xbin:/odm/bin:/vendor/bin:/vendor/xbin"
+            "PATH=/debug_ramdisk:/sbin:/product/bin:/apex/com.android.runtime/bin:/apex/com.android.art/bin:/system_ext/bin:/system/bin:/system/xbin:/odm/bin:/vendor/bin:/vendor/xbin"
         };
 
         TerminalSession session = new TerminalSession(shellPath, cwd, args, env, DEFAULT_TRANSCRIPT_ROWS, client);

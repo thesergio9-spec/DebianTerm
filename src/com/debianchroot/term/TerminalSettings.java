@@ -126,21 +126,27 @@ public final class TerminalSettings {
 
     public String getChrootPath() {
         String p = mPrefs.getString(KEY_CHROOT_PATH, DEFAULT_CHROOT_PATH);
-        return (p == null || p.trim().isEmpty()) ? DEFAULT_CHROOT_PATH : sanitizePath(p);
+        if (p == null || p.trim().isEmpty() || p.trim().equals("/")) {
+            return DEFAULT_CHROOT_PATH;
+        }
+        return sanitizePath(p);
     }
 
     public void setChrootPath(String path) {
-        String sanitized = (path == null || path.trim().isEmpty()) ? DEFAULT_CHROOT_PATH : sanitizePath(path);
+        String sanitized = (path == null || path.trim().isEmpty() || path.trim().equals("/")) ? DEFAULT_CHROOT_PATH : sanitizePath(path);
         mPrefs.edit().putString(KEY_CHROOT_PATH, sanitized).apply();
     }
 
     public String getEntryScriptPath() {
         String p = mPrefs.getString(KEY_ENTRY_SCRIPT_PATH, DEFAULT_ENTRY_SCRIPT_PATH);
-        return (p == null || p.trim().isEmpty()) ? DEFAULT_ENTRY_SCRIPT_PATH : sanitizePath(p);
+        if (p == null || p.trim().isEmpty() || p.trim().equals("/")) {
+            return DEFAULT_ENTRY_SCRIPT_PATH;
+        }
+        return sanitizePath(p);
     }
 
     public void setEntryScriptPath(String path) {
-        String sanitized = (path == null || path.trim().isEmpty()) ? DEFAULT_ENTRY_SCRIPT_PATH : sanitizePath(path);
+        String sanitized = (path == null || path.trim().isEmpty() || path.trim().equals("/")) ? DEFAULT_ENTRY_SCRIPT_PATH : sanitizePath(path);
         mPrefs.edit().putString(KEY_ENTRY_SCRIPT_PATH, sanitized).apply();
     }
 
