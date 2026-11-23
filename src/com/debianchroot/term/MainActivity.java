@@ -61,8 +61,9 @@ import java.util.regex.Pattern;
 
 /**
  * Main activity featuring:
- * 1) Startup Debian 12 (Bookworm) Requirements & Two-Path Installer Dashboard (Con Root & Sin Root/PRoot)
+ * 1) Startup Debian 12 (Bookworm) Requirements, Graphical/CLI Selector & Two-Path Installer Dashboard
  * 2) Patched Termux TerminalView with synchronized output (DECSET 2026) and soft-keyboard anti-rewind pan
+ * 3) Integrated RFB VNC Desktop Canvas + optional Termux:X11 launcher
  */
 public final class MainActivity extends Activity implements TerminalViewClient, TerminalSessionClient {
 
@@ -79,6 +80,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
     private FrameLayout mRootFrame;
     private SlideDrawerLayout mDrawerLayout;
     private ScrollView mDashboardView;
+    private LinearLayout mDesktopView;
     private TerminalView mTerminalView;
     private ExtraKeysBarView mExtraKeys;
 
@@ -90,14 +92,39 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
     private TextView mDrawerChrootSummary;
     private LinearLayout mDrawerSessionsContainer;
     private Button mDrawerAndroidShellBtn;
+    private Button mDrawerDesktopBtn;
+
+    // Integrated VNC Desktop controls
+    private VncCanvasView mVncCanvas;
+    private LinearLayout mDesktopOverlay;
+    private TextView mDesktopOverlayText;
+    private TextView mDesktopTouchToggleBtn;
+    private RfbClient mRfbClient;
+    private TerminalSession mActiveDesktopSession;
 
     // Dashboard controls
     private LinearLayout mDashResumeContainer;
     private Button mDashResumeBtn;
+    private Button mDashResumeGuiBtn;
     private ProgressBar mDashCheckSpinner;
     private TextView mDashVerdictBanner;
     private LinearLayout mDashReqsList;
 
+    // Graphical Mode Card controls
+    private RadioButton mUiCliRb;
+    private RadioButton mUiGuiRb;
+    private RadioButton mBackendVncRb;
+    private RadioButton mBackendX11Rb;
+    private LinearLayout mX11NoticeBox;
+    private TextView mX11NoticeText;
+    private Button mX11DownloadBtn;
+    private RadioButton mDeskXfceRb;
+    private RadioButton mDeskLxdeRb;
+    private RadioGroup mResGroup;
+    private TextView mGuiDesktopStatusTv;
+    private Button mInstallDesktopBtn;
+
+    // Path Cards controls
     private TextView mRootCardBadge;
     private TextView mRootCardSummary;
     private Button mRootPrimaryBtn;
@@ -208,6 +235,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
 
     @Override
     protected void onDestroy() {
+        disconnectRfbClient();
         if (mBound) {
             unbindService(mServiceConnection);
             mBound = false;
@@ -218,6 +246,10 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
 
     @Override
     public void onBackPressed() {
+        if (isDesktopVisible()) {
+            showDashboardView();
+            return;
+        }
         if (isTerminalVisible() && mDrawerLayout != null && mDrawerLayout.isDrawerOpen()) {
             mDrawerLayout.closeDrawer();
             return;
@@ -230,7 +262,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
     }
 
     // -------------------------------------------------------------------------
-    // Root Layout & View Switching (Dashboard <-> Terminal)
+    // Root Layout & View Switching (Dashboard <-> Terminal <-> Desktop GUI)
     // -------------------------------------------------------------------------
 
     private View buildRootLayout() {
@@ -239,11 +271,15 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
 
         mDrawerLayout = buildTerminalDrawerLayout();
         mDashboardView = buildDashboardView();
+        mDesktopView = buildDesktopView();
 
         mDrawerLayout.setVisibility(View.GONE);
+        mDesktopView.setVisibility(View.GONE);
         mDashboardView.setVisibility(View.VISIBLE);
 
         mRootFrame.addView(mDrawerLayout, new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        mRootFrame.addView(mDesktopView, new FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         mRootFrame.addView(mDashboardView, new FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
@@ -255,31 +291,27 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         return mDrawerLayout != null && mDrawerLayout.getVisibility() == View.VISIBLE;
     }
 
+    private boolean isDesktopVisible() {
+        return mDesktopView != null && mDesktopView.getVisibility() == View.VISIBLE;
+    }
+
     private void showDashboardView() {
         hideSoftKeyboard();
         if (mDrawerLayout != null && mDrawerLayout.isDrawerOpen()) {
             mDrawerLayout.closeDrawer();
         }
-        if (mDrawerLayout != null) {
-            mDrawerLayout.setVisibility(View.GONE);
-        }
-        if (mTerminalView != null) {
-            mTerminalView.setTerminalCursorBlinkerState(false, true);
-        }
-        if (mDashboardView != null) {
-            mDashboardView.setVisibility(View.VISIBLE);
-        }
+        if (mDrawerLayout != null) mDrawerLayout.setVisibility(View.GONE);
+        if (mDesktopView != null) mDesktopView.setVisibility(View.GONE);
+        if (mTerminalView != null) mTerminalView.setTerminalCursorBlinkerState(false, true);
+        if (mDashboardView != null) mDashboardView.setVisibility(View.VISIBLE);
         updateDashboardResumeBar();
         runRequirementsCheckAsync(false);
     }
 
     private void showTerminalView() {
-        if (mDashboardView != null) {
-            mDashboardView.setVisibility(View.GONE);
-        }
-        if (mDrawerLayout != null) {
-            mDrawerLayout.setVisibility(View.VISIBLE);
-        }
+        if (mDashboardView != null) mDashboardView.setVisibility(View.GONE);
+        if (mDesktopView != null) mDesktopView.setVisibility(View.GONE);
+        if (mDrawerLayout != null) mDrawerLayout.setVisibility(View.VISIBLE);
         if (mTerminalView != null) {
             mTerminalView.requestFocus();
             mTerminalView.setTerminalCursorBlinkerRate(500);
@@ -287,8 +319,122 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         }
     }
 
+    private void showDesktopView() {
+        if (mDashboardView != null) mDashboardView.setVisibility(View.GONE);
+        if (mDrawerLayout != null) {
+            if (mDrawerLayout.isDrawerOpen()) mDrawerLayout.closeDrawer();
+            mDrawerLayout.setVisibility(View.GONE);
+        }
+        if (mTerminalView != null) mTerminalView.setTerminalCursorBlinkerState(false, true);
+        if (mDesktopView != null) mDesktopView.setVisibility(View.VISIBLE);
+        if (mVncCanvas != null) mVncCanvas.requestFocus();
+    }
+
     // -------------------------------------------------------------------------
-    // Startup Requirements & Two-Path Installer Dashboard UI
+    // Integrated VNC Desktop View UI
+    // -------------------------------------------------------------------------
+
+    private LinearLayout buildDesktopView() {
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setBackgroundColor(Color.parseColor("#0D1117"));
+
+        LinearLayout bar = new LinearLayout(this);
+        bar.setOrientation(LinearLayout.HORIZONTAL);
+        bar.setGravity(Gravity.CENTER_VERTICAL);
+        bar.setBackgroundColor(Color.parseColor("#161B22"));
+        bar.setPadding(dp(4), dp(2), dp(4), dp(2));
+
+        bar.addView(makeDesktopBarButton("⌂ Inicio", "#21262D", v -> showDashboardView()));
+        bar.addView(makeDesktopBarButton(">_ Term", "#21262D", v -> showTerminalView()));
+        mDesktopTouchToggleBtn = makeDesktopBarButton("🖱 Touch", "#1F6FEB", v -> toggleDesktopPointerMode());
+        bar.addView(mDesktopTouchToggleBtn);
+        bar.addView(makeDesktopBarButton("Clic Der.", "#21262D", v -> {
+            if (mVncCanvas != null) mVncCanvas.sendRightClickAtCursor();
+        }));
+        bar.addView(makeDesktopBarButton("⌨", "#21262D", v -> toggleDesktopKeyboard()));
+
+        View spacer = new View(this);
+        bar.addView(spacer, new LinearLayout.LayoutParams(0, 1, 1f));
+
+        bar.addView(makeDesktopBarButton("✕ Detener", "#B62324", v -> stopActiveDesktop()));
+        root.addView(bar, new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(40)));
+
+        FrameLayout canvasWrap = new FrameLayout(this);
+        mVncCanvas = new VncCanvasView(this);
+        canvasWrap.addView(mVncCanvas, new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        mDesktopOverlay = new LinearLayout(this);
+        mDesktopOverlay.setOrientation(LinearLayout.VERTICAL);
+        mDesktopOverlay.setGravity(Gravity.CENTER);
+        mDesktopOverlay.setBackgroundColor(Color.parseColor("#CC0D1117"));
+        mDesktopOverlay.setPadding(dp(24), dp(24), dp(24), dp(24));
+
+        ProgressBar pb = new ProgressBar(this);
+        mDesktopOverlay.addView(pb);
+
+        mDesktopOverlayText = new TextView(this);
+        mDesktopOverlayText.setText("Conectando al escritorio Debian 12 (VNC :1)...");
+        mDesktopOverlayText.setTextColor(Color.parseColor("#E6EDF3"));
+        mDesktopOverlayText.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        mDesktopOverlayText.setGravity(Gravity.CENTER);
+        mDesktopOverlayText.setPadding(0, dp(12), 0, dp(12));
+        mDesktopOverlay.addView(mDesktopOverlayText);
+
+        Button viewLogBtn = makeActionButton("Ver consola del servidor", "#30363D", v -> showTerminalView());
+        mDesktopOverlay.addView(viewLogBtn, new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        canvasWrap.addView(mDesktopOverlay, new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        root.addView(canvasWrap, new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+        return root;
+    }
+
+    private TextView makeDesktopBarButton(String label, String bgHex, View.OnClickListener listener) {
+        TextView tv = new TextView(this);
+        tv.setText(label);
+        tv.setTextColor(Color.WHITE);
+        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
+        tv.setTypeface(Typeface.DEFAULT_BOLD);
+        tv.setGravity(Gravity.CENTER);
+        tv.setPadding(dp(8), dp(5), dp(8), dp(5));
+        tv.setBackground(makePillBg(bgHex));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.setMargins(dp(2), 0, dp(2), 0);
+        tv.setLayoutParams(lp);
+        tv.setOnClickListener(listener);
+        return tv;
+    }
+
+    private void toggleDesktopPointerMode() {
+        if (mVncCanvas == null || mDesktopTouchToggleBtn == null) return;
+        boolean nextTouchpad = !mVncCanvas.isTouchpadMode();
+        mVncCanvas.setTouchpadMode(nextTouchpad);
+        mDesktopTouchToggleBtn.setText(nextTouchpad ? "🖱 Touch" : "👆 Táctil");
+        mDesktopTouchToggleBtn.setBackground(makePillBg(nextTouchpad ? "#1F6FEB" : "#238636"));
+        Toast.makeText(this,
+            nextTouchpad ? "Modo Touchpad (arrastra cursor, 2 dedos clic der./scroll)"
+                         : "Modo Táctil directo (toca y arrastra directo en pantalla)",
+            Toast.LENGTH_SHORT).show();
+    }
+
+    private void toggleDesktopKeyboard() {
+        if (mVncCanvas == null) return;
+        mVncCanvas.requestFocus();
+        InputMethodManager imm = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+        if (imm != null) {
+            imm.toggleSoftInput(InputMethodManager.SHOW_FORCED, 0);
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Startup Requirements, Graphical Selector & Two-Path Installer Dashboard
     // -------------------------------------------------------------------------
 
     private ScrollView buildDashboardView() {
@@ -316,19 +462,17 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         titleCol.addView(titleTv);
 
         TextView subTv = new TextView(this);
-        subTv.setText("Instalador y Terminal Debian 12 (Bookworm)");
+        subTv.setText("Instalador Debian 12 • Terminal y Escritorio Gráfico");
         subTv.setTextColor(Color.parseColor("#8B949E"));
         subTv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
         titleCol.addView(subTv);
         header.addView(titleCol, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
-        TextView refreshBtn = makeHeaderIconButton("↻", v -> runRequirementsCheckAsync(false));
-        TextView settingsBtn = makeHeaderIconButton("⚙", v -> showSettingsDialog());
-        header.addView(refreshBtn);
-        header.addView(settingsBtn);
+        header.addView(makeHeaderIconButton("↻", v -> runRequirementsCheckAsync(false)));
+        header.addView(makeHeaderIconButton("⚙", v -> showSettingsDialog()));
         container.addView(header);
 
-        // 2. Resume active terminal banner (only shown when sessions exist)
+        // 2. Resume bars (active terminal / active graphical desktop)
         mDashResumeContainer = new LinearLayout(this);
         mDashResumeContainer.setOrientation(LinearLayout.VERTICAL);
         mDashResumeContainer.setVisibility(View.GONE);
@@ -337,13 +481,28 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         resumeWrapLp.setMargins(0, 0, 0, dp(10));
         mDashResumeContainer.setLayoutParams(resumeWrapLp);
 
+        mDashResumeGuiBtn = new Button(this);
+        mDashResumeGuiBtn.setAllCaps(false);
+        mDashResumeGuiBtn.setTextColor(Color.WHITE);
+        mDashResumeGuiBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f);
+        mDashResumeGuiBtn.setTypeface(Typeface.DEFAULT_BOLD);
+        mDashResumeGuiBtn.setBackground(makeRoundedBg("#238636", "#3FB950", 8));
+        mDashResumeGuiBtn.setPadding(dp(14), dp(9), dp(14), dp(9));
+        mDashResumeGuiBtn.setText("🖥 Volver al Escritorio Gráfico activo");
+        mDashResumeGuiBtn.setVisibility(View.GONE);
+        mDashResumeGuiBtn.setOnClickListener(v -> showDesktopView());
+        LinearLayout.LayoutParams guiResLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        guiResLp.setMargins(0, 0, 0, dp(6));
+        mDashResumeContainer.addView(mDashResumeGuiBtn, guiResLp);
+
         mDashResumeBtn = new Button(this);
         mDashResumeBtn.setAllCaps(false);
         mDashResumeBtn.setTextColor(Color.WHITE);
         mDashResumeBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f);
         mDashResumeBtn.setTypeface(Typeface.DEFAULT_BOLD);
         mDashResumeBtn.setBackground(makeRoundedBg("#1F6FEB", "#388BFD", 8));
-        mDashResumeBtn.setPadding(dp(14), dp(10), dp(14), dp(10));
+        mDashResumeBtn.setPadding(dp(14), dp(9), dp(14), dp(9));
         mDashResumeBtn.setOnClickListener(v -> showTerminalView());
         mDashResumeContainer.addView(mDashResumeBtn, new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
@@ -356,7 +515,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         reqHead.setGravity(Gravity.CENTER_VERTICAL);
 
         TextView reqTitle = new TextView(this);
-        reqTitle.setText("VERIFICACIÓN DE REQUERIMIENTOS");
+        reqTitle.setText("1. VERIFICACIÓN DE REQUERIMIENTOS");
         reqTitle.setTextColor(Color.parseColor("#8B949E"));
         reqTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
         reqTitle.setTypeface(Typeface.DEFAULT_BOLD);
@@ -367,7 +526,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         reqCard.addView(reqHead);
 
         mDashVerdictBanner = new TextView(this);
-        mDashVerdictBanner.setText("Analizando hardware, almacenamiento, red, root y PRoot...");
+        mDashVerdictBanner.setText("Analizando hardware, almacenamiento, red, root, PRoot y entorno gráfico...");
         mDashVerdictBanner.setTextColor(Color.parseColor("#E6EDF3"));
         mDashVerdictBanner.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
         mDashVerdictBanner.setTypeface(Typeface.DEFAULT_BOLD);
@@ -379,7 +538,10 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         reqCard.addView(mDashReqsList);
         container.addView(reqCard);
 
-        // 4. Card 2: Camino 1 — Con Root (Chroot Nativo)
+        // 4. Card 2: Modo de Inicio & Entorno Gráfico (Híbrido: VNC Integrado + Termux:X11)
+        container.addView(buildGraphicalModeCard());
+
+        // 5. Card 3: Camino 1 — Con Root (Chroot Nativo)
         LinearLayout rootCard = makeCardLayout();
         LinearLayout rootHead = new LinearLayout(this);
         rootHead.setOrientation(LinearLayout.HORIZONTAL);
@@ -426,7 +588,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         rootCard.addView(rootBtnRow);
         container.addView(rootCard);
 
-        // 5. Card 3: Camino 2 — Sin Root (PRoot Integrado)
+        // 6. Card 4: Camino 2 — Sin Root (PRoot Integrado)
         LinearLayout prootCard = makeCardLayout();
         LinearLayout prootHead = new LinearLayout(this);
         prootHead.setOrientation(LinearLayout.HORIZONTAL);
@@ -473,7 +635,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         prootCard.addView(prootBtnRow);
         container.addView(prootCard);
 
-        // 6. Footer preference switch
+        // 7. Footer preference switch
         LinearLayout footerCard = makeCardLayout();
         mDashAutoEnterSwitch = new Switch(this);
         mDashAutoEnterSwitch.setText("Entrar automáticamente a Debian 12 al iniciar");
@@ -485,7 +647,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         footerCard.addView(mDashAutoEnterSwitch);
 
         TextView autoHint = new TextView(this);
-        autoHint.setText("Cuando está desactivado, siempre verás este panel de requisitos e instalación al abrir la app.");
+        autoHint.setText("Respeta tu modo elegido arriba (Terminal CLI o Modo Gráfico) en el camino instalado.");
         autoHint.setTextColor(Color.parseColor("#8B949E"));
         autoHint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
         autoHint.setPadding(0, dp(4), 0, 0);
@@ -494,6 +656,181 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
 
         scroll.addView(container);
         return scroll;
+    }
+
+    private LinearLayout buildGraphicalModeCard() {
+        LinearLayout card = makeCardLayout();
+
+        TextView header = new TextView(this);
+        header.setText("2. MODO DE INICIO (TERMINAL O ESCRITORIO GRÁFICO)");
+        header.setTextColor(Color.parseColor("#8B949E"));
+        header.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
+        header.setTypeface(Typeface.DEFAULT_BOLD);
+        card.addView(header);
+
+        RadioGroup uiModeGroup = new RadioGroup(this);
+        uiModeGroup.setOrientation(LinearLayout.HORIZONTAL);
+        uiModeGroup.setPadding(0, dp(6), 0, dp(4));
+
+        mUiCliRb = new RadioButton(this);
+        mUiCliRb.setText("⌨ Terminal (CLI)");
+        mUiCliRb.setTextColor(Color.parseColor("#E6EDF3"));
+        mUiCliRb.setId(View.generateViewId());
+
+        mUiGuiRb = new RadioButton(this);
+        mUiGuiRb.setText("🖥 Modo Gráfico");
+        mUiGuiRb.setTextColor(Color.parseColor("#E6EDF3"));
+        mUiGuiRb.setId(View.generateViewId());
+
+        uiModeGroup.addView(mUiCliRb);
+        uiModeGroup.addView(mUiGuiRb);
+
+        if (TerminalSettings.UI_MODE_GUI.equals(mSettings.getLaunchUiMode())) {
+            mUiGuiRb.setChecked(true);
+        } else {
+            mUiCliRb.setChecked(true);
+        }
+        mUiCliRb.setOnClickListener(v -> {
+            mSettings.setLaunchUiMode(TerminalSettings.UI_MODE_CLI);
+            updatePathButtonsForMode();
+        });
+        mUiGuiRb.setOnClickListener(v -> {
+            mSettings.setLaunchUiMode(TerminalSettings.UI_MODE_GUI);
+            updatePathButtonsForMode();
+        });
+        card.addView(uiModeGroup);
+
+        // Hybrid backend selector
+        TextView backLbl = new TextView(this);
+        backLbl.setText("Motor gráfico (Híbrido):");
+        backLbl.setTextColor(Color.parseColor("#C9D1D9"));
+        backLbl.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        backLbl.setTypeface(Typeface.DEFAULT_BOLD);
+        backLbl.setPadding(0, dp(6), 0, dp(2));
+        card.addView(backLbl);
+
+        RadioGroup backendGroup = new RadioGroup(this);
+        backendGroup.setOrientation(LinearLayout.HORIZONTAL);
+        mBackendVncRb = new RadioButton(this);
+        mBackendVncRb.setText("Visor VNC Integrado");
+        mBackendVncRb.setTextColor(Color.parseColor("#E6EDF3"));
+        mBackendVncRb.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        mBackendVncRb.setId(View.generateViewId());
+
+        mBackendX11Rb = new RadioButton(this);
+        mBackendX11Rb.setText("Termux:X11 (60 FPS)");
+        mBackendX11Rb.setTextColor(Color.parseColor("#E6EDF3"));
+        mBackendX11Rb.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        mBackendX11Rb.setId(View.generateViewId());
+
+        backendGroup.addView(mBackendVncRb);
+        backendGroup.addView(mBackendX11Rb);
+        if (DesktopManager.BACKEND_TERMUX_X11.equals(mSettings.getGuiBackend())) {
+            mBackendX11Rb.setChecked(true);
+        } else {
+            mBackendVncRb.setChecked(true);
+        }
+        mBackendVncRb.setOnClickListener(v -> {
+            mSettings.setGuiBackend(DesktopManager.BACKEND_VNC);
+            updatePathButtonsForMode();
+        });
+        mBackendX11Rb.setOnClickListener(v -> {
+            mSettings.setGuiBackend(DesktopManager.BACKEND_TERMUX_X11);
+            updatePathButtonsForMode();
+        });
+        card.addView(backendGroup);
+
+        // Termux:X11 detection & download recommendation notice
+        mX11NoticeBox = new LinearLayout(this);
+        mX11NoticeBox.setOrientation(LinearLayout.VERTICAL);
+        mX11NoticeBox.setBackground(makeRoundedBg("#0D1117", "#30363D", 6));
+        mX11NoticeBox.setPadding(dp(10), dp(8), dp(10), dp(8));
+        LinearLayout.LayoutParams noticeLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        noticeLp.setMargins(0, dp(6), 0, dp(6));
+        mX11NoticeBox.setLayoutParams(noticeLp);
+
+        mX11NoticeText = new TextView(this);
+        mX11NoticeText.setText("Comprobando si Termux:X11 está instalado...");
+        mX11NoticeText.setTextColor(Color.parseColor("#8B949E"));
+        mX11NoticeText.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
+        mX11NoticeBox.addView(mX11NoticeText);
+
+        mX11DownloadBtn = makeActionButton("⬇ Descargar Termux:X11 APK (GitHub)", "#1F6FEB", v ->
+            DesktopManager.openTermuxX11Download(MainActivity.this));
+        mX11DownloadBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        LinearLayout.LayoutParams dlLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        dlLp.setMargins(0, dp(6), 0, 0);
+        mX11NoticeBox.addView(mX11DownloadBtn, dlLp);
+        card.addView(mX11NoticeBox);
+
+        // Desktop environment + Resolution
+        TextView deskLbl = new TextView(this);
+        deskLbl.setText("Escritorio y Resolución VNC:");
+        deskLbl.setTextColor(Color.parseColor("#C9D1D9"));
+        deskLbl.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        deskLbl.setTypeface(Typeface.DEFAULT_BOLD);
+        deskLbl.setPadding(0, dp(4), 0, dp(2));
+        card.addView(deskLbl);
+
+        RadioGroup deskGroup = new RadioGroup(this);
+        deskGroup.setOrientation(LinearLayout.HORIZONTAL);
+        mDeskXfceRb = new RadioButton(this);
+        mDeskXfceRb.setText("XFCE4 (Completo)");
+        mDeskXfceRb.setTextColor(Color.parseColor("#E6EDF3"));
+        mDeskXfceRb.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        mDeskXfceRb.setId(View.generateViewId());
+
+        mDeskLxdeRb = new RadioButton(this);
+        mDeskLxdeRb.setText("LXDE (Ligero)");
+        mDeskLxdeRb.setTextColor(Color.parseColor("#E6EDF3"));
+        mDeskLxdeRb.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        mDeskLxdeRb.setId(View.generateViewId());
+
+        deskGroup.addView(mDeskXfceRb);
+        deskGroup.addView(mDeskLxdeRb);
+        if (DesktopManager.DESKTOP_LXDE.equals(mSettings.getDesktopEnv())) {
+            mDeskLxdeRb.setChecked(true);
+        } else {
+            mDeskXfceRb.setChecked(true);
+        }
+        mDeskXfceRb.setOnClickListener(v -> mSettings.setDesktopEnv(DesktopManager.DESKTOP_XFCE));
+        mDeskLxdeRb.setOnClickListener(v -> mSettings.setDesktopEnv(DesktopManager.DESKTOP_LXDE));
+        card.addView(deskGroup);
+
+        mResGroup = new RadioGroup(this);
+        mResGroup.setOrientation(LinearLayout.HORIZONTAL);
+        String curRes = mSettings.getGuiResolution();
+        for (final String resOpt : TerminalSettings.ALL_GUI_RESOLUTIONS) {
+            RadioButton rb = new RadioButton(this);
+            rb.setText(resOpt);
+            rb.setTextColor(Color.parseColor("#C9D1D9"));
+            rb.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
+            rb.setId(View.generateViewId());
+            mResGroup.addView(rb);
+            if (resOpt.equals(curRes)) {
+                rb.setChecked(true);
+            }
+            rb.setOnClickListener(v -> mSettings.setGuiResolution(resOpt));
+        }
+        card.addView(mResGroup);
+
+        mGuiDesktopStatusTv = new TextView(this);
+        mGuiDesktopStatusTv.setText("Estado escritorio: comprobando...");
+        mGuiDesktopStatusTv.setTextColor(Color.parseColor("#8B949E"));
+        mGuiDesktopStatusTv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
+        mGuiDesktopStatusTv.setTypeface(Typeface.MONOSPACE);
+        mGuiDesktopStatusTv.setPadding(0, dp(6), 0, dp(8));
+        card.addView(mGuiDesktopStatusTv);
+
+        mInstallDesktopBtn = makeActionButton("⬇ Instalar Escritorio (XFCE4 / LXDE)", "#30363D", v ->
+            promptInstallDesktopTarget());
+        mInstallDesktopBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
+        card.addView(mInstallDesktopBtn, new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        return card;
     }
 
     private TextView makeHeaderIconButton(String icon, View.OnClickListener listener) {
@@ -696,6 +1033,13 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         actions.setOrientation(LinearLayout.VERTICAL);
         actions.setPadding(dp(10), dp(8), dp(10), dp(12));
 
+        mDrawerDesktopBtn = makeDrawerActionButton("🖥 Volver al Escritorio Gráfico", "#238636", v -> {
+            mDrawerLayout.closeDrawer();
+            showDesktopView();
+        });
+        mDrawerDesktopBtn.setVisibility(View.GONE);
+        actions.addView(mDrawerDesktopBtn);
+
         actions.addView(makeDrawerActionButton("+ Nueva sesión Debian 12 (Root)", "#D70A53", v -> {
             mDrawerLayout.closeDrawer();
             openNewRootDebianSession();
@@ -766,7 +1110,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
     }
 
     // -------------------------------------------------------------------------
-    // Session Management
+    // Session Management (CLI + Graphical Desktop)
     // -------------------------------------------------------------------------
 
     private void openNewRootDebianSession() {
@@ -811,6 +1155,198 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         updateDashboardResumeBar();
     }
 
+    private void launchGraphicalDebian(final boolean isRootMode) {
+        if (mService == null) return;
+        final String desktopId = mSettings.getDesktopEnv();
+        final String backend = mSettings.getGuiBackend();
+        DesktopManager.DesktopStatus ds = mLastReport.desktopStatus;
+
+        boolean hasDesktop = isRootMode ? ds.rootDesktopInstalled : ds.prootDesktopInstalled;
+        boolean hasVnc = isRootMode ? ds.rootVncServerInstalled : ds.prootVncServerInstalled;
+
+        if (!hasDesktop || (DesktopManager.BACKEND_VNC.equals(backend) && !hasVnc)) {
+            String desktopLabel = DesktopManager.DESKTOP_LXDE.equals(desktopId) ? "LXDE" : "XFCE4";
+            new AlertDialog.Builder(this)
+                .setTitle("Entorno gráfico no instalado")
+                .setMessage("Para iniciar Debian 12 en modo gráfico necesitas instalar " + desktopLabel
+                    + " + TigerVNC dentro del entorno " + (isRootMode ? "Con Root" : "Sin Root")
+                    + " mediante apt-get.\n\n¿Deseas instalarlo ahora?")
+                .setPositiveButton("Instalar ahora en terminal", (d, w) ->
+                    startDesktopInstallInTerminal(isRootMode, desktopId))
+                .setNegativeButton("Cancelar", null)
+                .show();
+            return;
+        }
+
+        if (DesktopManager.BACKEND_TERMUX_X11.equals(backend)) {
+            if (!ds.termuxX11Installed) {
+                new AlertDialog.Builder(this)
+                    .setTitle("Termux:X11 no está instalado")
+                    .setMessage("No se encontró la app Termux:X11 en este dispositivo.\n\n"
+                        + "Puedes descargar e instalar su APK para máxima fluidez (60 FPS) o iniciar ahora mismo con el Visor VNC Integrado de DebianTerm.")
+                    .setPositiveButton("⬇ Descargar Termux:X11 APK", (d, w) ->
+                        DesktopManager.openTermuxX11Download(MainActivity.this))
+                    .setNeutralButton("Usar Visor VNC Integrado ahora", (d, w) -> {
+                        mSettings.setGuiBackend(DesktopManager.BACKEND_VNC);
+                        if (mBackendVncRb != null) mBackendVncRb.setChecked(true);
+                        openVncDesktopSession(isRootMode);
+                    })
+                    .setNegativeButton("Cancelar", null)
+                    .show();
+                return;
+            }
+            openX11DesktopSession(isRootMode);
+        } else {
+            openVncDesktopSession(isRootMode);
+        }
+    }
+
+    private void startDesktopInstallInTerminal(boolean isRootMode, String desktopId) {
+        if (mService == null) return;
+        showTerminalView();
+        TerminalSession session = mService.createDesktopInstallSession(
+            isRootMode,
+            mSettings.getChrootPath(),
+            mSettings.getEntryScriptPath(),
+            desktopId,
+            this
+        );
+        switchToSession(session);
+        refreshDrawerSessions();
+        updateDashboardResumeBar();
+    }
+
+    private void openVncDesktopSession(boolean isRootMode) {
+        if (mService == null) return;
+        mSettings.setInstallMode(isRootMode ? TerminalSettings.MODE_ROOT : TerminalSettings.MODE_PROOT);
+        disconnectRfbClient();
+        if (mActiveDesktopSession != null && mActiveDesktopSession.isRunning()) {
+            mService.removeSession(mActiveDesktopSession);
+        }
+
+        int[] res = DesktopManager.parseResolution(mSettings.getGuiResolution());
+        TerminalSession deskSession = mService.createDesktopVncSession(
+            isRootMode,
+            mSettings.getChrootPath(),
+            mSettings.getEntryScriptPath(),
+            mSettings.getDesktopEnv(),
+            res[0],
+            res[1],
+            this
+        );
+        mActiveDesktopSession = deskSession;
+        switchToSession(deskSession);
+        showDesktopView();
+        mDesktopOverlay.setVisibility(View.VISIBLE);
+        mDesktopOverlayText.setText("Iniciando "
+            + (DesktopManager.DESKTOP_LXDE.equals(mSettings.getDesktopEnv()) ? "LXDE" : "XFCE4")
+            + " (" + res[0] + "×" + res[1] + ") en VNC :1...");
+
+        RfbClient client = new RfbClient();
+        mRfbClient = client;
+        mVncCanvas.attachClient(client);
+        client.connectWithRetry("127.0.0.1", DesktopManager.VNC_PORT, "", 40, 250L, new RfbClient.FrameListener() {
+            @Override
+            public void onConnected(int width, int height, String desktopName) {
+                runOnUiThread(() -> {
+                    mVncCanvas.initFramebuffer(width, height);
+                    mDesktopOverlay.setVisibility(View.GONE);
+                });
+            }
+
+            @Override
+            public void onFramebufferResize(int width, int height) {
+                runOnUiThread(() -> mVncCanvas.initFramebuffer(width, height));
+            }
+
+            @Override
+            public void onFrameUpdated(int[] pixels, int width, int height, int x, int y, int w, int h) {
+                mVncCanvas.updateFramebufferRect(pixels, width, height, x, y, w, h);
+                if (mDesktopOverlay.getVisibility() == View.VISIBLE) {
+                    runOnUiThread(() -> mDesktopOverlay.setVisibility(View.GONE));
+                }
+            }
+
+            @Override
+            public void onServerCutText(final String text) {
+                if (TextUtils.isEmpty(text)) return;
+                runOnUiThread(() -> {
+                    ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                    if (cm != null) {
+                        cm.setPrimaryClip(ClipData.newPlainText("DebianTerm Desktop", text));
+                    }
+                });
+            }
+
+            @Override
+            public void onDisconnected(final String reason) {
+                runOnUiThread(() -> {
+                    if (mRfbClient != client) return;
+                    if (isDesktopVisible()) {
+                        mDesktopOverlay.setVisibility(View.VISIBLE);
+                        mDesktopOverlayText.setText("Sesión VNC finalizada: " + reason);
+                    }
+                });
+            }
+        });
+        refreshDrawerSessions();
+        updateDashboardResumeBar();
+    }
+
+    private void openX11DesktopSession(boolean isRootMode) {
+        if (mService == null) return;
+        mSettings.setInstallMode(isRootMode ? TerminalSettings.MODE_ROOT : TerminalSettings.MODE_PROOT);
+        TerminalSession deskSession = mService.createDesktopX11Session(
+            isRootMode,
+            mSettings.getChrootPath(),
+            mSettings.getEntryScriptPath(),
+            mSettings.getDesktopEnv(),
+            mLastReport.desktopStatus,
+            this
+        );
+        switchToSession(deskSession);
+        showTerminalView();
+        refreshDrawerSessions();
+        updateDashboardResumeBar();
+
+        Toast.makeText(this, "Iniciando servidor Termux:X11 y escritorio Debian 12...", Toast.LENGTH_SHORT).show();
+        mRootFrame.postDelayed(() -> {
+            if (!DesktopManager.launchTermuxX11App(MainActivity.this)) {
+                Toast.makeText(MainActivity.this,
+                    "Abre la app Termux:X11 manualmente si no saltó al frente.",
+                    Toast.LENGTH_LONG).show();
+            }
+        }, 900L);
+    }
+
+    private void stopActiveDesktop() {
+        disconnectRfbClient();
+        if (mService != null && mActiveDesktopSession != null) {
+            mService.removeSession(mActiveDesktopSession);
+            if (mCurrentSession == mActiveDesktopSession) {
+                List<TerminalSession> rem = mService.getSessions();
+                mCurrentSession = rem.isEmpty() ? null : rem.get(rem.size() - 1);
+                if (mCurrentSession != null) {
+                    mTerminalView.attachSession(mCurrentSession);
+                }
+            }
+        }
+        mActiveDesktopSession = null;
+        showDashboardView();
+        refreshDrawerSessions();
+    }
+
+    private void disconnectRfbClient() {
+        RfbClient c = mRfbClient;
+        mRfbClient = null;
+        if (mVncCanvas != null) {
+            mVncCanvas.detachClient();
+        }
+        if (c != null) {
+            c.disconnect();
+        }
+    }
+
     private void switchToSession(TerminalSession session) {
         if (session == null) return;
         mCurrentSession = session;
@@ -831,10 +1367,18 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
     }
 
     private void updateDashboardResumeBar() {
+        boolean hasDesktop = mActiveDesktopSession != null && mActiveDesktopSession.isRunning();
+        if (mDrawerDesktopBtn != null) {
+            mDrawerDesktopBtn.setVisibility(hasDesktop ? View.VISIBLE : View.GONE);
+        }
         if (mDashResumeContainer == null || mDashResumeBtn == null) return;
         int count = (mService != null) ? mService.getSessions().size() : 0;
-        if (count > 0) {
+        if (mDashResumeGuiBtn != null) {
+            mDashResumeGuiBtn.setVisibility(hasDesktop ? View.VISIBLE : View.GONE);
+        }
+        if (count > 0 || hasDesktop) {
             mDashResumeContainer.setVisibility(View.VISIBLE);
+            mDashResumeBtn.setVisibility(count > 0 ? View.VISIBLE : View.GONE);
             mDashResumeBtn.setText("↩ Volver a la terminal activa (" + count + ")");
         } else {
             mDashResumeContainer.setVisibility(View.GONE);
@@ -897,6 +1441,10 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
 
     private void closeSession(TerminalSession session) {
         if (mService == null || session == null) return;
+        if (session == mActiveDesktopSession) {
+            disconnectRfbClient();
+            mActiveDesktopSession = null;
+        }
         boolean wasCurrent = (session == mCurrentSession);
         mService.removeSession(session);
         List<TerminalSession> remaining = mService.getSessions();
@@ -959,21 +1507,43 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
                 renderDashboardReport(report);
                 updateChrootStatusBadges(report);
                 if (allowAutoEnter && mSettings.isAutoEnterTerminal() && mService != null && mService.getSessions().isEmpty()) {
-                    tryAutoEnterTerminal(report);
+                    tryAutoEnterPreferredMode(report);
                 }
             });
         });
     }
 
-    private void tryAutoEnterTerminal(SystemRequirements.Report report) {
-        String preferred = mSettings.getInstallMode();
-        if (TerminalSettings.MODE_ROOT.equals(preferred) && report.hasRoot && report.rootStatus.rootfsExists) {
+    private void tryAutoEnterPreferredMode(SystemRequirements.Report report) {
+        String preferredPath = mSettings.getInstallMode();
+        boolean useGui = TerminalSettings.UI_MODE_GUI.equals(mSettings.getLaunchUiMode());
+
+        boolean rootReady = report.hasRoot && report.rootStatus.rootfsExists;
+        boolean prootReady = report.prootBinariesReady && report.prootStatus.rootfsExists;
+        Boolean chosenIsRoot = null;
+        if (TerminalSettings.MODE_ROOT.equals(preferredPath) && rootReady) {
+            chosenIsRoot = Boolean.TRUE;
+        } else if (TerminalSettings.MODE_PROOT.equals(preferredPath) && prootReady) {
+            chosenIsRoot = Boolean.FALSE;
+        } else if (rootReady) {
+            chosenIsRoot = Boolean.TRUE;
+        } else if (prootReady) {
+            chosenIsRoot = Boolean.FALSE;
+        }
+        if (chosenIsRoot == null) return;
+
+        if (useGui) {
+            DesktopManager.DesktopStatus ds = report.desktopStatus;
+            boolean hasGui = chosenIsRoot
+                ? (ds.rootDesktopInstalled && ds.rootVncServerInstalled)
+                : (ds.prootDesktopInstalled && ds.prootVncServerInstalled);
+            if (hasGui) {
+                launchGraphicalDebian(chosenIsRoot);
+                return;
+            }
+        }
+        if (chosenIsRoot) {
             openNewRootDebianSession();
-        } else if (TerminalSettings.MODE_PROOT.equals(preferred) && report.prootBinariesReady && report.prootStatus.rootfsExists) {
-            openNewProotDebianSession();
-        } else if (report.hasRoot && report.rootStatus.rootfsExists) {
-            openNewRootDebianSession();
-        } else if (report.prootBinariesReady && report.prootStatus.rootfsExists) {
+        } else {
             openNewProotDebianSession();
         }
     }
@@ -1012,7 +1582,46 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
             }
         }
 
-        // 3. Path 1 Card: Con Root
+        // 3. Graphical Mode Card update (Termux:X11 detection & recommendation)
+        DesktopManager.DesktopStatus ds = r.desktopStatus;
+        if (mX11NoticeBox != null && mX11NoticeText != null && mX11DownloadBtn != null) {
+            if (ds.termuxX11Installed) {
+                mX11NoticeBox.setBackground(makeRoundedBg("#0D1117", "#238636", 6));
+                mX11NoticeText.setText("✓ Termux:X11 v" + ds.termuxX11Version
+                    + " detectado — Puedes elegir Visor VNC Integrado o Termux:X11 (60 FPS).");
+                mX11NoticeText.setTextColor(Color.parseColor("#3FB950"));
+                mX11DownloadBtn.setVisibility(View.GONE);
+            } else {
+                mX11NoticeBox.setBackground(makeRoundedBg("#0D1117", "#1F6FEB", 6));
+                mX11NoticeText.setText("ℹ Termux:X11 no está instalado. Puedes usar el Visor VNC Integrado ahora mismo sin apps extra o descargar Termux:X11 APK para mayor fluidez (60 FPS).");
+                mX11NoticeText.setTextColor(Color.parseColor("#79C0FF"));
+                mX11DownloadBtn.setVisibility(View.VISIBLE);
+            }
+        }
+
+        if (mGuiDesktopStatusTv != null) {
+            String rootGui = !r.rootStatus.rootfsExists
+                ? "sin Debian"
+                : (ds.rootDesktopInstalled
+                    ? (ds.rootDesktopName + (ds.rootVncServerInstalled ? " + VNC ✓" : " (falta VNC)"))
+                    : "sin escritorio");
+            String prootGui = !r.prootStatus.rootfsExists
+                ? "sin Debian"
+                : (ds.prootDesktopInstalled
+                    ? (ds.prootDesktopName + (ds.prootVncServerInstalled ? " + VNC ✓" : " (falta VNC)"))
+                    : "sin escritorio");
+            mGuiDesktopStatusTv.setText("Escritorio -> Con Root: " + rootGui + " | Sin Root: " + prootGui);
+        }
+
+        if (mInstallDesktopBtn != null) {
+            boolean anyDebian = (r.hasRoot && r.rootStatus.rootfsExists) || r.prootStatus.rootfsExists;
+            mInstallDesktopBtn.setEnabled(anyDebian);
+            mInstallDesktopBtn.setText(anyDebian
+                ? "⬇ Instalar / Añadir Escritorio (XFCE4 / LXDE)"
+                : "Instala primero Debian 12 en Camino 1 o Camino 2");
+        }
+
+        // 4. Path 1 Card: Con Root
         ChrootManager.ChrootStatus rs = r.rootStatus;
         if (rs.rootfsExists) {
             mRootCardBadge.setText("Instalado ✓");
@@ -1024,11 +1633,39 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
             mRootCardBadge.setText("Requiere Root");
             mRootCardBadge.setBackground(makePillBg("#6E7681"));
         }
-
         mRootCardSummary.setText(formatRootCardSummary(r));
 
-        if (rs.rootfsExists) {
-            mRootPrimaryBtn.setText("▶ Entrar a Debian 12 (Root)");
+        // 5. Path 2 Card: Sin Root (PRoot)
+        ProotManager.ProotStatus ps = r.prootStatus;
+        if (ps.rootfsExists) {
+            mProotCardBadge.setText("Instalado ✓");
+            mProotCardBadge.setBackground(makePillBg("#238636"));
+        } else if (!r.hasRoot && r.prootBinariesReady) {
+            mProotCardBadge.setText("Recomendado");
+            mProotCardBadge.setBackground(makePillBg("#1F6FEB"));
+        } else if (r.prootBinariesReady) {
+            mProotCardBadge.setText("Disponible");
+            mProotCardBadge.setBackground(makePillBg("#30363D"));
+        } else {
+            mProotCardBadge.setText("No disponible");
+            mProotCardBadge.setBackground(makePillBg("#B62324"));
+        }
+        mProotCardSummary.setText(formatProotCardSummary(r));
+
+        updatePathButtonsForMode();
+
+        if (mDashAutoEnterSwitch != null) {
+            mDashAutoEnterSwitch.setChecked(mSettings.isAutoEnterTerminal());
+        }
+    }
+
+    private void updatePathButtonsForMode() {
+        if (mRootPrimaryBtn == null || mProotPrimaryBtn == null) return;
+        SystemRequirements.Report r = mLastReport;
+        boolean guiMode = TerminalSettings.UI_MODE_GUI.equals(mSettings.getLaunchUiMode());
+
+        if (r.rootStatus.rootfsExists && r.hasRoot) {
+            mRootPrimaryBtn.setText(guiMode ? "🖥 Iniciar Escritorio (Root)" : "▶ Entrar a Debian 12 (Root)");
             mRootPrimaryBtn.setBackground(makePillBg("#D70A53"));
             mRootPrimaryBtn.setEnabled(true);
             mRootSecondaryBtn.setText("Gestionar");
@@ -1044,26 +1681,8 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
             mRootSecondaryBtn.setText("Rutas / Info");
         }
 
-        // 4. Path 2 Card: Sin Root (PRoot)
-        ProotManager.ProotStatus ps = r.prootStatus;
-        if (ps.rootfsExists) {
-            mProotCardBadge.setText("Instalado ✓");
-            mProotCardBadge.setBackground(makePillBg("#238636"));
-        } else if (!r.hasRoot && r.prootBinariesReady) {
-            mProotCardBadge.setText("Recomendado");
-            mProotCardBadge.setBackground(makePillBg("#1F6FEB"));
-        } else if (r.prootBinariesReady) {
-            mProotCardBadge.setText("Disponible");
-            mProotCardBadge.setBackground(makePillBg("#30363D"));
-        } else {
-            mProotCardBadge.setText("No disponible");
-            mProotCardBadge.setBackground(makePillBg("#B62324"));
-        }
-
-        mProotCardSummary.setText(formatProotCardSummary(r));
-
-        if (ps.rootfsExists) {
-            mProotPrimaryBtn.setText("▶ Entrar a Debian 12 (Sin Root)");
+        if (r.prootStatus.rootfsExists) {
+            mProotPrimaryBtn.setText(guiMode ? "🖥 Iniciar Escritorio (Sin Root)" : "▶ Entrar a Debian 12 (Sin Root)");
             mProotPrimaryBtn.setBackground(makePillBg("#238636"));
             mProotPrimaryBtn.setEnabled(r.prootBinariesReady);
             mProotSecondaryBtn.setVisibility(View.VISIBLE);
@@ -1079,10 +1698,6 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
             mProotPrimaryBtn.setBackground(makePillBg("#30363D"));
             mProotPrimaryBtn.setEnabled(false);
             mProotSecondaryBtn.setVisibility(View.GONE);
-        }
-
-        if (mDashAutoEnterSwitch != null) {
-            mDashAutoEnterSwitch.setChecked(mSettings.isAutoEnterTerminal());
         }
     }
 
@@ -1219,9 +1834,45 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
     // Dashboard Card Actions & Management Dialogs
     // -------------------------------------------------------------------------
 
+    private void promptInstallDesktopTarget() {
+        boolean canRoot = mLastReport.hasRoot && mLastReport.rootStatus.rootfsExists;
+        boolean canProot = mLastReport.prootBinariesReady && mLastReport.prootStatus.rootfsExists;
+        final String desktopId = mSettings.getDesktopEnv();
+        final String deskName = DesktopManager.DESKTOP_LXDE.equals(desktopId) ? "LXDE" : "XFCE4";
+
+        if (!canRoot && !canProot) {
+            Toast.makeText(this, "Instala primero Debian 12 en Camino 1 o Camino 2.", Toast.LENGTH_LONG).show();
+            return;
+        }
+        if (canRoot && canProot) {
+            String[] opts = {
+                "Instalar " + deskName + " en Camino 1 (Con Root)",
+                "Instalar " + deskName + " en Camino 2 (Sin Root PRoot)"
+            };
+            new AlertDialog.Builder(this)
+                .setTitle("¿Dónde instalar el escritorio " + deskName + "?")
+                .setItems(opts, (d, idx) -> startDesktopInstallInTerminal(idx == 0, desktopId))
+                .setNegativeButton("Cancelar", null)
+                .show();
+        } else {
+            final boolean isRoot = canRoot;
+            new AlertDialog.Builder(this)
+                .setTitle("Instalar Escritorio " + deskName)
+                .setMessage("Se instalarán " + deskName + " y TigerVNC dentro de Debian 12 ("
+                    + (isRoot ? "Con Root" : "Sin Root PRoot") + ") usando apt-get (~350–600 MB).")
+                .setPositiveButton("Instalar ahora", (d, w) -> startDesktopInstallInTerminal(isRoot, desktopId))
+                .setNegativeButton("Cancelar", null)
+                .show();
+        }
+    }
+
     private void onRootPrimaryClicked() {
         if (mLastReport.rootStatus.rootfsExists && mLastReport.hasRoot) {
-            openNewRootDebianSession();
+            if (TerminalSettings.UI_MODE_GUI.equals(mSettings.getLaunchUiMode())) {
+                launchGraphicalDebian(true);
+            } else {
+                openNewRootDebianSession();
+            }
             return;
         }
         if (!mLastReport.hasRoot) {
@@ -1239,7 +1890,11 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
 
     private void onProotPrimaryClicked() {
         if (mLastReport.prootStatus.rootfsExists) {
-            openNewProotDebianSession();
+            if (TerminalSettings.UI_MODE_GUI.equals(mSettings.getLaunchUiMode())) {
+                launchGraphicalDebian(false);
+            } else {
+                openNewProotDebianSession();
+            }
             return;
         }
         if (!mLastReport.prootBinariesReady) {
@@ -2142,6 +2797,9 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
 
     @Override
     public void onSessionFinished(TerminalSession finishedSession) {
+        if (finishedSession == mActiveDesktopSession) {
+            mActiveDesktopSession = null;
+        }
         refreshDrawerSessions();
     }
 

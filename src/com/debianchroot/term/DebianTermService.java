@@ -168,6 +168,128 @@ public final class DebianTermService extends Service {
         return createRawSession("/system/bin/sh", shCmd, "Debian 12 (Sin Root) #" + (++mSessionCounter), client);
     }
 
+    public TerminalSession createDebianCommandSession(
+        boolean isRootMode,
+        String chrootPath,
+        String scriptPath,
+        String innerDebianCmd,
+        String label,
+        TerminalSessionClient client
+    ) {
+        ensureForegroundStarted();
+        String name = (label != null && !label.isEmpty()) ? label : ("Debian GUI #" + (++mSessionCounter));
+        if (isRootMode) {
+            String suBin = ChrootManager.resolveWorkingSuPath();
+            String qScript = ChrootManager.shellQuote(scriptPath);
+            String qChroot = ChrootManager.shellQuote(chrootPath);
+            String qInner = ChrootManager.shellQuote(innerDebianCmd);
+            String rootCmd =
+                "if [ -x " + qScript + " ]; then " +
+                "  " + qScript + " exec " + qInner + "; " +
+                "elif [ -x " + qChroot + "/bin/bash ]; then " +
+                "  env -i HOME=/root USER=root LOGNAME=root TERM=xterm-256color LANG=C.UTF-8 " +
+                "  PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin " +
+                "  chroot " + qChroot + " /bin/bash -lc " + qInner + "; " +
+                "else " +
+                "  echo 'Chroot Debian no encontrado en " + chrootPath + "'; " +
+                "fi";
+            String shCmd = "exec " + ChrootManager.shellQuote(suBin) + " -c " + ChrootManager.shellQuote(rootCmd);
+            return createRawSession("/system/bin/sh", shCmd, name, client);
+        } else {
+            java.io.File script = ProotManager.getLauncherScript(this);
+            try {
+                boolean noSeccomp = new TerminalSettings(this).isProotDisableSeccomp();
+                // Always refresh launcher so -c invocation is supported even for existing installs
+                script = ProotManager.installLauncherScript(this, noSeccomp);
+            } catch (java.io.IOException e) {
+                String errCmd = "echo " + ChrootManager.shellQuote("Error preparando script PRoot: " + e.getMessage())
+                    + "; exec /system/bin/sh";
+                return createRawSession("/system/bin/sh", errCmd, name, client);
+            }
+            String shCmd = "exec " + ChrootManager.shellQuote(script.getAbsolutePath()) + " -c "
+                + ChrootManager.shellQuote(innerDebianCmd);
+            return createRawSession("/system/bin/sh", shCmd, name, client);
+        }
+    }
+
+    public TerminalSession createDesktopVncSession(
+        boolean isRootMode,
+        String chrootPath,
+        String scriptPath,
+        String desktopId,
+        int width,
+        int height,
+        TerminalSessionClient client
+    ) {
+        String vncCmd = DesktopManager.generateVncStartCommand(desktopId, width, height);
+        String label = (DesktopManager.DESKTOP_LXDE.equals(desktopId) ? "LXDE VNC" : "XFCE4 VNC")
+            + (isRootMode ? " (Root)" : " (PRoot)");
+        return createDebianCommandSession(isRootMode, chrootPath, scriptPath, vncCmd, label, client);
+    }
+
+    public TerminalSession createDesktopX11Session(
+        boolean isRootMode,
+        String chrootPath,
+        String scriptPath,
+        String desktopId,
+        DesktopManager.DesktopStatus deskStatus,
+        TerminalSessionClient client
+    ) {
+        ensureForegroundStarted();
+        String sharedTmp = isRootMode
+            ? (chrootPath + "/tmp")
+            : new java.io.File(ProotManager.getRootfsDir(this), "tmp").getAbsolutePath();
+        String x11ServerCmd = DesktopManager.generateTermuxX11ServerCommand(
+            deskStatus.termuxX11ApkPath, deskStatus.termuxX11LibDir, sharedTmp);
+        String x11ClientCmd = DesktopManager.generateTermuxX11StartCommand(desktopId);
+        String label = (DesktopManager.DESKTOP_LXDE.equals(desktopId) ? "LXDE X11" : "XFCE4 X11")
+            + (isRootMode ? " (Root)" : " (PRoot)");
+
+        if (isRootMode) {
+            String suBin = ChrootManager.resolveWorkingSuPath();
+            String qScript = ChrootManager.shellQuote(scriptPath);
+            String qChroot = ChrootManager.shellQuote(chrootPath);
+            String qClient = ChrootManager.shellQuote(x11ClientCmd);
+            String rootCmd = x11ServerCmd + "\n" +
+                "if [ -x " + qScript + " ]; then\n" +
+                "  " + qScript + " exec " + qClient + "\n" +
+                "else\n" +
+                "  env -i HOME=/root USER=root LOGNAME=root TERM=xterm-256color LANG=C.UTF-8 " +
+                "  PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin " +
+                "  chroot " + qChroot + " /bin/bash -lc " + qClient + "\n" +
+                "fi\n";
+            String shCmd = "exec " + ChrootManager.shellQuote(suBin) + " -c " + ChrootManager.shellQuote(rootCmd);
+            return createRawSession("/system/bin/sh", shCmd, label, client);
+        } else {
+            java.io.File script = ProotManager.getLauncherScript(this);
+            try {
+                boolean noSeccomp = new TerminalSettings(this).isProotDisableSeccomp();
+                script = ProotManager.installLauncherScript(this, noSeccomp);
+            } catch (java.io.IOException e) {
+                String errCmd = "echo " + ChrootManager.shellQuote("Error preparando script PRoot: " + e.getMessage())
+                    + "; exec /system/bin/sh";
+                return createRawSession("/system/bin/sh", errCmd, label, client);
+            }
+            String shCmd = x11ServerCmd + "\n" + ChrootManager.shellQuote(script.getAbsolutePath())
+                + " -c " + ChrootManager.shellQuote(x11ClientCmd) + "\n";
+            return createRawSession("/system/bin/sh", shCmd, label, client);
+        }
+    }
+
+    public TerminalSession createDesktopInstallSession(
+        boolean isRootMode,
+        String chrootPath,
+        String scriptPath,
+        String desktopId,
+        TerminalSessionClient client
+    ) {
+        String installCmd = DesktopManager.generateDesktopInstallCommand(desktopId)
+            + "\nexec /bin/bash -l\n";
+        String label = "Instalar " + (DesktopManager.DESKTOP_LXDE.equals(desktopId) ? "LXDE" : "XFCE4")
+            + (isRootMode ? " (Root)" : " (Sin Root)");
+        return createDebianCommandSession(isRootMode, chrootPath, scriptPath, installCmd, label, client);
+    }
+
     public TerminalSession createAndroidRootSession(TerminalSessionClient client) {
         ensureForegroundStarted();
         String suBin = ChrootManager.resolveWorkingSuPath();

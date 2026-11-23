@@ -353,6 +353,20 @@ public final class ProotManager {
         sb.append("    set -- \"$@\" \"--bind=/storage/emulated/0:/sdcard\"\n");
         sb.append("fi\n\n");
 
+        sb.append("CMD_ARGS=\"--login\"\n");
+        sb.append("if [ \"$1\" = \"-c\" ] && [ -n \"$2\" ]; then\n");
+        sb.append("    exec \"$@\" /usr/bin/env -i \\\n");
+        sb.append("      HOME=/root \\\n");
+        sb.append("      USER=root \\\n");
+        sb.append("      LOGNAME=root \\\n");
+        sb.append("      TERM=\"${TERM:-xterm-256color}\" \\\n");
+        sb.append("      COLORTERM=truecolor \\\n");
+        sb.append("      LANG=C.UTF-8 \\\n");
+        sb.append("      TMPDIR=/tmp \\\n");
+        sb.append("      PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \\\n");
+        sb.append("      /bin/bash -lc \"$2\"\n");
+        sb.append("fi\n\n");
+
         sb.append("exec \"$@\" /usr/bin/env -i \\\n");
         sb.append("  HOME=/root \\\n");
         sb.append("  USER=root \\\n");

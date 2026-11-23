@@ -1,6 +1,6 @@
 # DebianTerm
 
-**DebianTerm** (v2.0.1) es un **instalador completo de Debian 12 (Bookworm)** y emulador de terminal para Android basado en el motor y teclado de Termux (`terminal-emulator` y `terminal-view`), ahora reestructurado con **verificación de requerimientos mínimos al iniciar** y **dos caminos de ejecución totalmente funcionales**:
+**DebianTerm** (v2.1.0) es un **instalador completo de Debian 12 (Bookworm)** y emulador de terminal + escritorio gráfico para Android basado en el motor y teclado de Termux (`terminal-emulator` y `terminal-view`), con **verificación de requerimientos mínimos al iniciar**, selector **Terminal (CLI) vs Modo Gráfico Híbrido** y **dos caminos de ejecución totalmente funcionales**:
 
 1. **Camino 1 — Con Root (Chroot Nativo)**: máximo rendimiento del kernel Linux y montajes reales para dispositivos con Magisk, KernelSU o APatch.
 2. **Camino 2 — Sin Root (PRoot Integrado)**: motor `PRoot` empaquetado directamente en el APK (`arm64-v8a` y `armeabi-v7a`), **100% independiente de Termux**, para dispositivos sin acceso root.
@@ -12,11 +12,11 @@ Coexiste de forma independiente junto a Termux (`com.termux`) usando su propio p
 ## 📥 Descarga Rápida
 
 Descarga el APK compilado desde la última Release:
-- **[DebianTerm.apk (v2.0.1)](https://github.com/thesergio9-spec/DebianTerm/releases/download/v2.0.1/DebianTerm.apk)**
+- **[DebianTerm.apk (v2.1.0)](https://github.com/thesergio9-spec/DebianTerm/releases/download/v2.1.0/DebianTerm.apk)**
 
 ---
 
-## 🚀 Características Principales (v2.0.0)
+## 🚀 Características Principales (v2.1.0)
 
 ### 1. Panel de Inicio y Verificación de Requerimientos Mínimos
 Al abrir la app se ejecuta automáticamente un diagnóstico (`SystemRequirements`) antes de instalar o iniciar Debian 12:
@@ -28,32 +28,39 @@ Al abrir la app se ejecuta automáticamente un diagnóstico (`SystemRequirements
 - **Detección Dual**:
   - **Camino 1 (Root `su`)**: detecta Magisk (`/debug_ramdisk/su`), KernelSU o APatch con su versión.
   - **Camino 2 (PRoot)**: verifica los binarios integrados `libproot.so` y `libproot_loader.so`.
-- Incluye un interruptor opcional (**"Entrar automáticamente a Debian 12 al iniciar"**) para conservar el panel al inicio o abrir la terminal directamente si ya está instalado.
+  - **Modo Gráfico Híbrido**: detecta si está instalado **Termux:X11** (`com.termux.x11`) o deja listo el **Visor VNC Integrado**.
+- Incluye un interruptor opcional (**"Entrar automáticamente a Debian 12 al iniciar"**) para respetar tu modo elegido (CLI o Gráfico) al abrir la app.
 
-### 2. Dos Caminos de Instalación y Ejecución Debian 12
+### 2. Modo Gráfico Híbrido antes de iniciar Debian 12 (XFCE4 / LXDE)
+En la tarjeta **Modo de Inicio**, antes de abrir Debian 12 en cualquiera de los dos caminos, puedes elegir entre:
+- **⌨ Terminal (CLI)** o **🖥 Modo Gráfico (Escritorio)**.
+- **Visor VNC Integrado (`RfbClient` + `VncCanvasView`)**:
+  - Cliente RFB 3.8 puro en Java (`Raw`, `CopyRect`, `Zlib` continuo, `DesktopSize`, portapapeles `ServerCutText`) conectado localmente a `Xtigervnc` en `127.0.0.1:5901` (`-localhost`).
+  - Funciona **100% sin apps externas** tanto en **Con Root** como en **Sin Root (PRoot)**.
+  - Controles táctiles integrados: modo **Touchpad** (movimiento relativo, 1 toque = clic izquierdo, pulsación larga o toque con 2 dedos = clic derecho, arrastre con 2 dedos = rueda scroll, pellizco = zoom), modo **Táctil directo**, teclado virtual X11 y cambio instantáneo entre escritorio y consola (`>_ Term`) sin cerrar el entorno gráfico.
+- **Soporte opcional `Termux:X11` (60 FPS)**:
+  - Detecta automáticamente si `com.termux.x11` está instalado para iniciar el servidor `CmdEntryPoint :0 -ac` + escritorio en alta fluidez.
+  - Si no lo detecta, **recomienda y enlaza la descarga oficial de `Termux:X11 APK`** desde GitHub Releases y permite iniciar igualmente con el Visor VNC Integrado al instante.
+- **Entornos y resoluciones:** **XFCE4 (Completo)** o **LXDE (Ligero)** con resoluciones `1280x720`, `960x540` o `1600x900` e instalador integrado en un toque.
+
+### 3. Dos Caminos de Instalación y Ejecución Debian 12
 
 #### Camino 1: Con Root (Chroot Nativo)
 - Detecta instalaciones existentes en `/data/local/debian` (o la ruta personalizada) sin sobrescribir ni desmontar destructivamente tus datos.
 - Descarga imágenes oficiales de **Debian 12 (Bookworm)** (o Debian 13 Testing en gestión avanzada) desde `images.linuxcontainers.org` verificadas por `SHA256SUMS`.
 - Genera un script de entrada seguro (`/data/local/bin/debian`) con aislamiento `env -i`, timeouts en montajes (`timeout 5 mount`), contador de sesiones en `/dev/chroot_sessions` con **desmontaje automático seguro al cerrar la última sesión** y subcomandos `status`, `stop`/`umount`, `exec`.
 - Ejecución directa en contexto `su` para evitar denegaciones SELinux en Android 10–15.
-- Cierre suave de sesiones (`finishGracefully`) enviando `SIGHUP`/`SIGTERM` antes del fallback `SIGKILL` al cerrar pestañas con `✕` o pulsar `Salir` en la notificación, permitiendo guardar el historial de `bash` y ejecutar trampas de limpieza.
+- Cierre suave de sesiones (`finishGracefully`) enviando `SIGHUP`/`SIGTERM` antes del fallback `SIGKILL` al cerrar pestañas con `✕` o pulsar `Salir` en la notificación.
 
 #### Camino 2: Sin Root (PRoot Integrado en el APK)
 - Incluye `libproot.so`, `libproot_loader.so` y `libproot_loader32.so` (`arm64-v8a` y `armeabi-v7a`) compilados con `targetSdkVersion=28` para permitir ejecución y mapeo binario en almacenamiento interno (`untrusted_app_27`) en Android 10–15.
 - Extractor **100% Java (`TarExtractor`)** con soporte USTAR, PAX, GNU LongName, permisos seguros de usuario, symlinks, hardlinks, exclusión segura de `/dev/*` y protección contra *path traversal*.
 - Entorno preconfigurado en `<filesDir>/debian12-proot`: DNS (`1.1.1.1`, `8.8.8.8`), grupos Android (`aid_inet`), APT (`APT::Sandbox::User "root"`, `policy-rc.d`), detección automática de compatibilidad `PROOT_NO_SECCOMP` y archivos virtuales `/proc/*` para herramientas CLI (`ps`, `top`, `free`, `apt`, `python3`).
 
-### 3. Corrección del "Rebobinado" al Abrir/Cerrar el Teclado
-En emuladores de terminal móviles convencionales, abrir o cerrar el teclado dispara `SIGWINCH`, forzando recálculo de filas y un "rebobinado" visual del buffer histórico:
-- **Modo Pan sin `SIGWINCH` (`soft-keyboard-pan-main-screen`)**: desacopla las filas visibles (`visualRows`) de las filas reales del PTY.
+### 4. Corrección del "Rebobinado" y Teclado Extra de Termux
+- **Modo Pan sin `SIGWINCH` (`soft-keyboard-pan-main-screen`)**: desacopla las filas visibles de las filas reales del PTY.
 - **Salida Sincronizada (`DECSET 2026`)**: soporte completo `CSI ? 2026 h/l` y `DECRQM`.
-- **Scrollback Anclado a Filas de Documento**: desplazamiento suave con `OverScroller` manteniendo la posición exacta de lectura.
-
-### 4. Teclado Extra Estilo Termux y Múltiples Sesiones
-- Barra extra con **Modo Completo (2 filas)**, **Modo Compacto (1 fila)** y **Modo Oculto**, teclas `CTRL`/`ALT` con estado *Latch* y *Locked*, auto-repetición y vibración háptica configurable.
-- **Slide Drawer** para alternar entre sesiones Debian 12 (Root / Sin Root), shell Android (`su` / `sh`) y volver al panel de inicio en cualquier momento.
-- **Servicio en primer plano** con notificación persistente, *Wake Lock* y 5 temas de color (*Debian Dark*, *AMOLED*, *Catppuccin Mocha*, *Gruvbox Dark*, *Solarized Light*).
+- **Scrollback Anclado a Filas de Documento** y barra de teclas extra configurables (`ESC`, `TAB`, `CTRL`, `ALT`, flechas, etc.), más 5 temas de color y servicio en primer plano con *Wake Lock*.
 
 ---
 
@@ -65,13 +72,16 @@ DebianTerm/
 ├── res/                         # Iconos vectoriales, colores, estilos y cadenas
 ├── src/
 │   ├── com/debianchroot/term/
-│   │   ├── MainActivity.java        # Panel de inicio/requisitos + UI terminal + diálogos Root/PRoot
-│   │   ├── SystemRequirements.java  # Verificador de requerimientos mínimos del dispositivo
+│   │   ├── MainActivity.java        # Dashboard de requisitos/gráficos/caminos + Terminal + Visor VNC
+│   │   ├── SystemRequirements.java  # Verificador de requerimientos mínimos y estado gráfico
+│   │   ├── DesktopManager.java      # Gestor XFCE4/LXDE, detección/descarga Termux:X11 y scripts GUI
+│   │   ├── RfbClient.java           # Cliente RFB 3.8 puro Java (Raw, CopyRect, Zlib, VNCAuth DES)
+│   │   ├── VncCanvasView.java       # Canvas VNC con Touchpad/Táctil, pinch-zoom y teclado X11
 │   │   ├── ChrootManager.java       # Detección root (su), inspección chroot y script de entrada
 │   │   ├── ProotManager.java        # Gestión del entorno sin root Debian 12 + lanzador PRoot
 │   │   ├── ChrootInstaller.java     # Descarga LXC + verificación SHA-256 (Root y PRoot)
 │   │   ├── TarExtractor.java        # Extractor tar.xz puro en Java para instalaciones sin root
-│   │   ├── DebianTermService.java   # Servicio en primer plano para sesiones Root, PRoot y sh
+│   │   ├── DebianTermService.java   # Servicio en primer plano para sesiones CLI y GUI
 │   │   ├── TerminalSettings.java    # Preferencias persistentes y esquemas de color
 │   │   ├── ExtraKeysBarView.java    # Barra de teclas extra estilo Termux
 │   │   └── SlideDrawerLayout.java   # Menú lateral deslizable de sesiones
@@ -80,7 +90,7 @@ DebianTerm/
 ├── libs/                        # Bibliotecas JAR (annotation-1.5.0, xz-1.9)
 ├── jniLibs/                     # Binarios nativos arm64-v8a y armeabi-v7a:
 │   │                            # libtermux.so, libproot.so, libproot_loader.so, libproot_loader32.so
-├── tests/                       # Suite de 8 pruebas unitarias en JVM (VerifyAll.java)
+├── tests/                       # Suite de 11 pruebas unitarias en JVM (VerifyAll.java)
 ├── setup-deps.sh                # Descarga código base Termux, JARs, libtermux.so y binarios PRoot
 └── build.sh                     # Compilación completa (aapt2, javac, d8, zipalign, apksigner)
 ```
@@ -88,8 +98,6 @@ DebianTerm/
 ---
 
 ## 📦 Compilación desde la Terminal
-
-El proyecto se compila directamente tanto en PC como en un entorno Linux dentro de Android (Debian Chroot o Termux):
 
 ```bash
 # 1. Clonar el repositorio
@@ -109,7 +117,7 @@ El APK resultante se generará en `build/DebianTerm-release.apk`.
 
 ## 🧪 Pruebas Unitarias
 
-La suite [VerifyAll.java](tests/VerifyAll.java) valida en JVM las **9 pruebas clave**:
+La suite [VerifyAll.java](tests/VerifyAll.java) valida en JVM las **11 pruebas clave**:
 1. Salida sincronizada `DECSET 2026` + consultas `DECRQM`.
 2. Modo Pan del teclado sin pérdida de scrollback ni redimensionamiento PTY (`SIGWINCH`).
 3. Parser en vivo del índice LXC (`bookworm` / `trixie`) y verificación `SHA256SUMS`.
@@ -119,8 +127,8 @@ La suite [VerifyAll.java](tests/VerifyAll.java) valida en JVM las **9 pruebas cl
 7. Extractor tar Java (`TarExtractor`: permisos, symlinks, hardlinks, rutas largas PAX > 120 caracteres, omisión de `/dev/*`, bloqueo de *path traversal* y borrado seguro sin seguir symlinks).
 8. Sintaxis (`sh -n`) y flags del script lanzador PRoot sin root (`ProotManager`).
 9. API de cierre suave de sesiones (`TerminalSession.finishGracefully` con `SIGHUP`/`SIGTERM` y fallback `SIGKILL`).
-
-Para compilarlas y ejecutarlas:
+10. Generación y validación `sh -n` de scripts gráficos (`DesktopManager`: XFCE4, LXDE, `Xtigervnc`, `Termux:X11` y URL oficial APK).
+11. Protocolo cliente RFB 3.8 (`RfbClient`) contra servidor VNC simulado (Raw + Zlib + CopyRect + `ServerCutText` + eventos de puntero/teclado).
 
 ```bash
 javac -encoding UTF-8 -cp build/classes:/opt/android-sdk/android.jar:libs/xz-1.9.jar -d build/test-classes tests/VerifyAll.java

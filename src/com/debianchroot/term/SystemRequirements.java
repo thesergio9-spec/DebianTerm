@@ -70,6 +70,7 @@ public final class SystemRequirements {
         public boolean prootBinariesReady;
         public ChrootManager.ChrootStatus rootStatus = new ChrootManager.ChrootStatus();
         public ProotManager.ProotStatus prootStatus = new ProotManager.ProotStatus();
+        public DesktopManager.DesktopStatus desktopStatus = new DesktopManager.DesktopStatus();
 
         public Report(List<CheckItem> items) {
             this.items = Collections.unmodifiableList(new ArrayList<>(items));
@@ -310,7 +311,46 @@ public final class SystemRequirements {
         );
         report.rootStatus = rootSt;
         report.prootStatus = prootSt;
-        return report;
+        DesktopManager.DesktopStatus deskSt = DesktopManager.inspectDesktopStatus(
+            context, report, settings.getChrootPath());
+
+        List<CheckItem> fullItems = new ArrayList<>(report.items);
+        if (deskSt.termuxX11Installed) {
+            fullItems.add(new CheckItem(
+                "gui",
+                "Modo Gráfico (Híbrido)",
+                "Termux:X11 v" + deskSt.termuxX11Version + " + VNC",
+                "Visor VNC integrado y aceleración Termux:X11 detectados",
+                Status.PASS
+            ));
+        } else {
+            fullItems.add(new CheckItem(
+                "gui",
+                "Modo Gráfico (Híbrido)",
+                "Visor VNC listo (Termux:X11 opcional)",
+                "VNC integrado disponible ya; puedes descargar Termux:X11 APK para 60 FPS",
+                Status.INFO
+            ));
+        }
+        Report fullReport = new Report(fullItems);
+        fullReport.apiLevel = report.apiLevel;
+        fullReport.androidVersion = report.androidVersion;
+        fullReport.primaryAbi = report.primaryAbi;
+        fullReport.debianArch = report.debianArch;
+        fullReport.totalRamMb = report.totalRamMb;
+        fullReport.availRamMb = report.availRamMb;
+        fullReport.freeStorageMb = report.freeStorageMb;
+        fullReport.totalStorageMb = report.totalStorageMb;
+        fullReport.hasNetwork = report.hasNetwork;
+        fullReport.mirrorReachable = report.mirrorReachable;
+        fullReport.hasRoot = report.hasRoot;
+        fullReport.suPath = report.suPath;
+        fullReport.suVersion = report.suVersion;
+        fullReport.prootBinariesReady = report.prootBinariesReady;
+        fullReport.rootStatus = rootSt;
+        fullReport.prootStatus = prootSt;
+        fullReport.desktopStatus = deskSt;
+        return fullReport;
     }
 
     public static boolean isSupportedAbi(String abi) {

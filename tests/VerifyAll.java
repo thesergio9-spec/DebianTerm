@@ -1,7 +1,9 @@
 import com.debianchroot.term.ChrootInstaller;
 import com.debianchroot.term.ChrootManager;
 import com.debianchroot.term.DebianTermService;
+import com.debianchroot.term.DesktopManager;
 import com.debianchroot.term.ProotManager;
+import com.debianchroot.term.RfbClient;
 import com.debianchroot.term.SystemRequirements;
 import com.debianchroot.term.TarExtractor;
 import com.debianchroot.term.TerminalSettings;
@@ -13,18 +15,27 @@ import com.termux.terminal.TerminalSessionClient;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
 import java.io.File;
 import java.io.InputStream;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.net.HttpURLConnection;
+import java.net.InetAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Properties;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.zip.Deflater;
 
 /**
  * JVM verification suite for DebianTerm:
@@ -37,6 +48,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * 7) TarExtractor (permissions, symlinks, hardlinks, PAX long path, dev skip, traversal block, safe delete)
  * 8) Generated PRoot launcher script syntax and flags
  * 9) Graceful session shutdown API (SIGHUP/SIGTERM -> SIGKILL fallback)
+ * 10) Graphical DesktopManager scripts (XFCE4/LXDE VNC, Termux:X11)
+ * 11) Pure-Java RFB 3.8 client protocol (Raw + Zlib + CopyRect + CutText + input)
  */
 public final class VerifyAll {
 
@@ -101,7 +114,9 @@ public final class VerifyAll {
         testTarExtractor();
         testProotLauncherScript();
         testGracefulCloseApi();
-        System.out.println("ALL 9 VERIFICATION TESTS PASSED.");
+        testDesktopManagerScripts();
+        testRfbClientProtocol();
+        System.out.println("ALL 11 VERIFICATION TESTS PASSED.");
     }
 
     private static void testDecset2026() {
@@ -432,6 +447,227 @@ public final class VerifyAll {
         check(Modifier.isPublic(stopAll.getModifiers()), "DebianTermService.stopAllSessionsAndSelf must be public");
 
         System.out.println("[PASS] Test 9: Graceful session shutdown API (SIGHUP/SIGTERM -> SIGKILL fallback)");
+    }
+
+    private static void testDesktopManagerScripts() throws Exception {
+        String xfceInstall = DesktopManager.generateDesktopInstallCommand(DesktopManager.DESKTOP_XFCE);
+        check(xfceInstall.contains("tigervnc-standalone-server"), "Install cmd must include tigervnc-standalone-server");
+        check(xfceInstall.contains("dbus-x11"), "Install cmd must include dbus-x11");
+        check(xfceInstall.contains("xfce4"), "XFCE install cmd must include xfce4");
+
+        String lxdeInstall = DesktopManager.generateDesktopInstallCommand(DesktopManager.DESKTOP_LXDE);
+        check(lxdeInstall.contains("lxde-core"), "LXDE install cmd must include lxde-core");
+        check(lxdeInstall.contains("tigervnc-standalone-server"), "LXDE install must include tigervnc-standalone-server");
+
+        String vncStart = DesktopManager.generateVncStartCommand(DesktopManager.DESKTOP_XFCE, 1280, 720);
+        check(vncStart.contains("Xtigervnc"), "VNC start must reference Xtigervnc");
+        check(vncStart.contains("-localhost"), "VNC start must bind localhost");
+        check(vncStart.contains("5901"), "VNC start must use port 5901");
+        check(vncStart.contains("trap cleanup_vnc EXIT HUP INT TERM"), "VNC start must trap cleanup");
+        check(vncStart.contains("dbus-launch --exit-with-session startxfce4"), "VNC start must launch XFCE4");
+
+        String x11Start = DesktopManager.generateTermuxX11StartCommand(DesktopManager.DESKTOP_LXDE);
+        check(x11Start.contains("DISPLAY=:0"), "Termux:X11 start must export DISPLAY=:0");
+        check(x11Start.contains("startlxde"), "Termux:X11 start must launch startlxde");
+
+        check(DesktopManager.TERMUX_X11_APK_URL.startsWith("https://github.com/termux/termux-x11/releases/"),
+            "Termux:X11 APK URL must point to official releases");
+
+        for (int idx = 0; idx < 2; idx++) {
+            String src = (idx == 0) ? vncStart : x11Start;
+            Path tmp = Paths.get("/tmp/test-desktop-" + idx + ".sh");
+            Files.write(tmp, src.getBytes(StandardCharsets.UTF_8));
+            try {
+                Process p = new ProcessBuilder("sh", "-n", tmp.toString()).start();
+                check(p.waitFor() == 0, "Desktop script sh -n failed (" + idx + ")");
+            } finally {
+                Files.deleteIfExists(tmp);
+            }
+        }
+        System.out.println("[PASS] Test 10: DesktopManager XFCE4/LXDE VNC & Termux:X11 scripts (sh -n)");
+    }
+
+    private static void testRfbClientProtocol() throws Exception {
+        final CountDownLatch frameDone = new CountDownLatch(1);
+        final CountDownLatch connectedLatch = new CountDownLatch(1);
+        final CountDownLatch cutLatch = new CountDownLatch(1);
+        final AtomicReference<int[]> lastPixels = new AtomicReference<>();
+        final AtomicReference<String> serverErr = new AtomicReference<>();
+        final AtomicReference<String> cutText = new AtomicReference<>();
+        final AtomicBoolean pointerOk = new AtomicBoolean(false);
+        final AtomicBoolean keyOk = new AtomicBoolean(false);
+
+        final ServerSocket ss = new ServerSocket(0, 1, InetAddress.getLoopbackAddress());
+        int port = ss.getLocalPort();
+
+        Thread serverThread = new Thread(() -> {
+            try (Socket s = ss.accept()) {
+                DataInputStream dis = new DataInputStream(s.getInputStream());
+                DataOutputStream dos = new DataOutputStream(s.getOutputStream());
+
+                // 1. Handshake RFB 003.008
+                dos.write("RFB 003.008\n".getBytes(StandardCharsets.US_ASCII));
+                dos.flush();
+                byte[] clientVer = new byte[12];
+                dis.readFully(clientVer);
+                check("RFB 003.008\n".equals(new String(clientVer, StandardCharsets.US_ASCII)), "Bad client RFB version");
+
+                // 2. Security None (1)
+                dos.writeByte(1); // 1 type
+                dos.writeByte(1); // None
+                dos.flush();
+                int chosen = dis.readUnsignedByte();
+                check(chosen == 1, "Expected Security None");
+                dos.writeInt(0); // SecurityResult OK
+                dos.flush();
+
+                // 3. ClientInit + ServerInit (4x4 desktop)
+                int shared = dis.readUnsignedByte();
+                check(shared == 1, "Expected shared ClientInit");
+                dos.writeShort(4);
+                dos.writeShort(4);
+                dos.write(new byte[16]); // default pixel format
+                byte[] dname = "MockDebian".getBytes(StandardCharsets.UTF_8);
+                dos.writeInt(dname.length);
+                dos.write(dname);
+                dos.flush();
+
+                // Expect SetPixelFormat (20), SetEncodings (4 + 4*4 = 20), FramebufferUpdateRequest (10)
+                byte[] setPf = new byte[20];
+                dis.readFully(setPf);
+                check(setPf[0] == 0 && setPf[4] == 32, "Expected SetPixelFormat 32bpp");
+
+                int encMsgType = dis.readUnsignedByte();
+                check(encMsgType == 2, "Expected SetEncodings");
+                dis.readUnsignedByte(); // pad
+                int numEnc = dis.readUnsignedShort();
+                dis.readFully(new byte[numEnc * 4]);
+
+                byte[] fbReq = new byte[10];
+                dis.readFully(fbReq);
+                check(fbReq[0] == 3 && fbReq[1] == 0, "Expected non-incremental FramebufferUpdateRequest");
+
+                // Send FramebufferUpdate with 3 rects: Raw (0,0 2x2), Zlib (2,0 2x2), CopyRect (0,0 -> 2,2 2x2)
+                dos.writeByte(0); // FramebufferUpdate
+                dos.writeByte(0); // pad
+                dos.writeShort(3);
+
+                // Rect 1: Raw red (0xFFFF0000 -> BGRX: 00,00,FF,00) at 0,0 2x2
+                dos.writeShort(0); dos.writeShort(0); dos.writeShort(2); dos.writeShort(2);
+                dos.writeInt(RfbClient.ENCODING_RAW);
+                byte[] rawBlock = new byte[16];
+                for (int p = 0; p < 4; p++) {
+                    rawBlock[p * 4] = 0x00;         // B
+                    rawBlock[p * 4 + 1] = 0x00;     // G
+                    rawBlock[p * 4 + 2] = (byte) 0xFF; // R
+                    rawBlock[p * 4 + 3] = 0x00;
+                }
+                dos.write(rawBlock);
+
+                // Rect 2: Zlib green (0xFF00FF00 -> BGRX: 00,FF,00,00) at 2,0 2x2
+                byte[] greenBlock = new byte[16];
+                for (int p = 0; p < 4; p++) {
+                    greenBlock[p * 4] = 0x00;
+                    greenBlock[p * 4 + 1] = (byte) 0xFF;
+                    greenBlock[p * 4 + 2] = 0x00;
+                    greenBlock[p * 4 + 3] = 0x00;
+                }
+                Deflater def = new Deflater();
+                def.setInput(greenBlock);
+                byte[] compOut = new byte[256];
+                int compLen = def.deflate(compOut, 0, compOut.length, Deflater.SYNC_FLUSH);
+                def.end();
+
+                dos.writeShort(2); dos.writeShort(0); dos.writeShort(2); dos.writeShort(2);
+                dos.writeInt(RfbClient.ENCODING_ZLIB);
+                dos.writeInt(compLen);
+                dos.write(compOut, 0, compLen);
+
+                // Rect 3: CopyRect from (0,0) -> (2,2) 2x2
+                dos.writeShort(2); dos.writeShort(2); dos.writeShort(2); dos.writeShort(2);
+                dos.writeInt(RfbClient.ENCODING_COPYRECT);
+                dos.writeShort(0); dos.writeShort(0);
+
+                // ServerCutText
+                byte[] cut = "clipboard-ok".getBytes(StandardCharsets.ISO_8859_1);
+                dos.writeByte(3); dos.write(new byte[3]); dos.writeInt(cut.length); dos.write(cut);
+                dos.flush();
+
+                // Read client events (incremental FBUR, pointer, key)
+                long deadline = System.currentTimeMillis() + 3000L;
+                while (System.currentTimeMillis() < deadline && (!pointerOk.get() || !keyOk.get())) {
+                    int mt = dis.read();
+                    if (mt == -1) break;
+                    if (mt == 3) {
+                        dis.readFully(new byte[9]);
+                    } else if (mt == 5) {
+                        byte[] pe = new byte[5];
+                        dis.readFully(pe);
+                        if (pe[0] == 1) pointerOk.set(true);
+                    } else if (mt == 4) {
+                        byte[] ke = new byte[7];
+                        dis.readFully(ke);
+                        if (ke[0] == 1 && (ke[6] & 0xff) == 0x0D) keyOk.set(true);
+                    }
+                }
+            } catch (Throwable t) {
+                serverErr.set(t.toString());
+            } finally {
+                try { ss.close(); } catch (Exception ignored) {}
+            }
+        }, "MockRfbServer");
+        serverThread.setDaemon(true);
+        serverThread.start();
+
+        RfbClient client = new RfbClient();
+        try {
+            client.connectWithRetry("127.0.0.1", port, "", 5, 50L, new RfbClient.FrameListener() {
+                @Override
+                public void onConnected(int width, int height, String desktopName) {
+                    if (width == 4 && height == 4 && "MockDebian".equals(desktopName)) {
+                        connectedLatch.countDown();
+                    }
+                }
+                @Override public void onFramebufferResize(int width, int height) {}
+                @Override
+                public void onFrameUpdated(int[] pixels, int width, int height, int x, int y, int w, int h) {
+                    lastPixels.set(pixels.clone());
+                    if (x == 2 && y == 2) {
+                        frameDone.countDown();
+                    }
+                }
+                @Override
+                public void onServerCutText(String text) {
+                    cutText.set(text);
+                    cutLatch.countDown();
+                }
+                @Override public void onDisconnected(String reason) {}
+            });
+
+            check(connectedLatch.await(5, TimeUnit.SECONDS), "RFB client did not connect");
+            check(frameDone.await(5, TimeUnit.SECONDS), "RFB frame updates did not complete");
+            check(cutLatch.await(5, TimeUnit.SECONDS), "ServerCutText not received");
+            check("clipboard-ok".equals(cutText.get()), "CutText mismatch: " + cutText.get());
+
+            int[] px = lastPixels.get();
+            check(px[0] == 0xFFFF0000, "Raw red pixel mismatch: " + Integer.toHexString(px[0]));
+            check(px[2] == 0xFF00FF00, "Zlib green pixel mismatch: " + Integer.toHexString(px[2]));
+            check(px[2 * 4 + 2] == 0xFFFF0000, "CopyRect pixel mismatch: " + Integer.toHexString(px[2 * 4 + 2]));
+
+            client.sendPointerEvent(1, 2, 2);
+            client.sendKeyEvent(true, 0xFF0D);
+            long waitEv = System.currentTimeMillis() + 2000L;
+            while (System.currentTimeMillis() < waitEv && (!pointerOk.get() || !keyOk.get())) {
+                Thread.sleep(20);
+            }
+            check(pointerOk.get(), "PointerEvent not received by server");
+            check(keyOk.get(), "KeyEvent not received by server");
+            check(serverErr.get() == null, "Mock RFB server error: " + serverErr.get());
+        } finally {
+            client.disconnect();
+            ss.close();
+        }
+        System.out.println("[PASS] Test 11: RFB 3.8 client (Raw + Zlib + CopyRect + ServerCutText + Pointer/Key)");
     }
 
     private static String fetchText(String urlStr) throws Exception {

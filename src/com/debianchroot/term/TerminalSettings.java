@@ -24,9 +24,22 @@ public final class TerminalSettings {
     private static final String KEY_INSTALL_MODE = "install_mode";
     private static final String KEY_AUTO_ENTER_TERMINAL = "auto_enter_terminal";
     private static final String KEY_PROOT_DISABLE_SECCOMP = "proot_disable_seccomp";
+    private static final String KEY_LAUNCH_UI_MODE = "launch_ui_mode";
+    private static final String KEY_DESKTOP_ENV = "desktop_env";
+    private static final String KEY_GUI_BACKEND = "gui_backend";
+    private static final String KEY_GUI_RESOLUTION = "gui_resolution";
 
     public static final String MODE_ROOT = "root";
     public static final String MODE_PROOT = "proot";
+
+    public static final String UI_MODE_CLI = "cli";
+    public static final String UI_MODE_GUI = "gui";
+
+    public static final String[] ALL_GUI_RESOLUTIONS = {
+        "1280x720",
+        "960x540",
+        "1600x900"
+    };
 
     public static final int MIN_FONT_SIZE_PX = 16;
     public static final int MAX_FONT_SIZE_PX = 68;
@@ -188,6 +201,54 @@ public final class TerminalSettings {
 
     public void setProotDisableSeccomp(boolean disabled) {
         mPrefs.edit().putBoolean(KEY_PROOT_DISABLE_SECCOMP, disabled).apply();
+    }
+
+    public String getLaunchUiMode() {
+        String m = mPrefs.getString(KEY_LAUNCH_UI_MODE, UI_MODE_CLI);
+        return UI_MODE_GUI.equals(m) ? UI_MODE_GUI : UI_MODE_CLI;
+    }
+
+    public void setLaunchUiMode(String mode) {
+        mPrefs.edit().putString(KEY_LAUNCH_UI_MODE, UI_MODE_GUI.equals(mode) ? UI_MODE_GUI : UI_MODE_CLI).apply();
+    }
+
+    public String getDesktopEnv() {
+        String d = mPrefs.getString(KEY_DESKTOP_ENV, DesktopManager.DESKTOP_XFCE);
+        return DesktopManager.DESKTOP_LXDE.equals(d) ? DesktopManager.DESKTOP_LXDE : DesktopManager.DESKTOP_XFCE;
+    }
+
+    public void setDesktopEnv(String env) {
+        mPrefs.edit().putString(KEY_DESKTOP_ENV,
+            DesktopManager.DESKTOP_LXDE.equals(env) ? DesktopManager.DESKTOP_LXDE : DesktopManager.DESKTOP_XFCE).apply();
+    }
+
+    public String getGuiBackend() {
+        String b = mPrefs.getString(KEY_GUI_BACKEND, DesktopManager.BACKEND_VNC);
+        return DesktopManager.BACKEND_TERMUX_X11.equals(b) ? DesktopManager.BACKEND_TERMUX_X11 : DesktopManager.BACKEND_VNC;
+    }
+
+    public void setGuiBackend(String backend) {
+        mPrefs.edit().putString(KEY_GUI_BACKEND,
+            DesktopManager.BACKEND_TERMUX_X11.equals(backend) ? DesktopManager.BACKEND_TERMUX_X11 : DesktopManager.BACKEND_VNC).apply();
+    }
+
+    public String getGuiResolution() {
+        String r = mPrefs.getString(KEY_GUI_RESOLUTION, ALL_GUI_RESOLUTIONS[0]);
+        for (String valid : ALL_GUI_RESOLUTIONS) {
+            if (valid.equals(r)) return valid;
+        }
+        return ALL_GUI_RESOLUTIONS[0];
+    }
+
+    public void setGuiResolution(String res) {
+        String chosen = ALL_GUI_RESOLUTIONS[0];
+        for (String valid : ALL_GUI_RESOLUTIONS) {
+            if (valid.equals(res)) {
+                chosen = valid;
+                break;
+            }
+        }
+        mPrefs.edit().putString(KEY_GUI_RESOLUTION, chosen).apply();
     }
 
     private static String sanitizePath(String raw) {
