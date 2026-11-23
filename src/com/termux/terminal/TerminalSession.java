@@ -232,6 +232,58 @@ public final class TerminalSession extends TerminalOutput {
         notifyScreenUpdate();
     }
 
+    /**
+     * Gracefully finish this terminal session by sending SIGHUP and SIGTERM first so interactive
+     * shells and chroot traps can flush history and unmount cleanly, falling back to SIGKILL
+     * if still running after {@code graceTimeoutMs}.
+     */
+    public void finishGracefully(final long graceTimeoutMs) {
+        final int pid;
+        synchronized (this) {
+            pid = mShellPid;
+        }
+        if (pid <= 0) {
+            return;
+        }
+        try {
+            Os.kill(-pid, OsConstants.SIGHUP);
+        } catch (ErrnoException | RuntimeException | LinkageError ignored) {
+        }
+        try {
+            Os.kill(pid, OsConstants.SIGHUP);
+        } catch (ErrnoException | RuntimeException | LinkageError ignored) {
+        }
+        try {
+            Os.kill(pid, OsConstants.SIGTERM);
+        } catch (ErrnoException | RuntimeException | LinkageError ignored) {
+        }
+
+        final long timeout = Math.max(100L, graceTimeoutMs);
+        Thread watchdog = new Thread(() -> {
+            long deadline = System.currentTimeMillis() + timeout;
+            while (System.currentTimeMillis() < deadline) {
+                if (!isRunning()) {
+                    return;
+                }
+                try {
+                    Thread.sleep(50L);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+            if (isRunning()) {
+                try {
+                    Os.kill(-pid, OsConstants.SIGKILL);
+                } catch (ErrnoException | RuntimeException | LinkageError ignored) {
+                }
+                finishIfRunning();
+            }
+        }, "TermSessionGracefulExit[pid=" + pid + "]");
+        watchdog.setDaemon(true);
+        watchdog.start();
+    }
+
     /** Finish this terminal session by sending SIGKILL to the shell. */
     public void finishIfRunning() {
         if (isRunning()) {

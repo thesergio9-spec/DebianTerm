@@ -1,6 +1,6 @@
 # DebianTerm
 
-**DebianTerm** (v2.0.0) es un **instalador completo de Debian 12 (Bookworm)** y emulador de terminal para Android basado en el motor y teclado de Termux (`terminal-emulator` y `terminal-view`), ahora reestructurado con **verificación de requerimientos mínimos al iniciar** y **dos caminos de ejecución totalmente funcionales**:
+**DebianTerm** (v2.0.1) es un **instalador completo de Debian 12 (Bookworm)** y emulador de terminal para Android basado en el motor y teclado de Termux (`terminal-emulator` y `terminal-view`), ahora reestructurado con **verificación de requerimientos mínimos al iniciar** y **dos caminos de ejecución totalmente funcionales**:
 
 1. **Camino 1 — Con Root (Chroot Nativo)**: máximo rendimiento del kernel Linux y montajes reales para dispositivos con Magisk, KernelSU o APatch.
 2. **Camino 2 — Sin Root (PRoot Integrado)**: motor `PRoot` empaquetado directamente en el APK (`arm64-v8a` y `armeabi-v7a`), **100% independiente de Termux**, para dispositivos sin acceso root.
@@ -12,7 +12,7 @@ Coexiste de forma independiente junto a Termux (`com.termux`) usando su propio p
 ## 📥 Descarga Rápida
 
 Descarga el APK compilado desde la última Release:
-- **[DebianTerm.apk (v2.0.0)](https://github.com/thesergio9-spec/DebianTerm/releases/download/v2.0.0/DebianTerm.apk)**
+- **[DebianTerm.apk (v2.0.1)](https://github.com/thesergio9-spec/DebianTerm/releases/download/v2.0.1/DebianTerm.apk)**
 
 ---
 
@@ -35,8 +35,9 @@ Al abrir la app se ejecuta automáticamente un diagnóstico (`SystemRequirements
 #### Camino 1: Con Root (Chroot Nativo)
 - Detecta instalaciones existentes en `/data/local/debian` (o la ruta personalizada) sin sobrescribir ni desmontar destructivamente tus datos.
 - Descarga imágenes oficiales de **Debian 12 (Bookworm)** (o Debian 13 Testing en gestión avanzada) desde `images.linuxcontainers.org` verificadas por `SHA256SUMS`.
-- Genera un script de entrada seguro (`/data/local/bin/debian`) con aislamiento `env -i`, timeouts en montajes (`timeout 5 mount`) y subcomandos `status`, `umount`, `exec`.
+- Genera un script de entrada seguro (`/data/local/bin/debian`) con aislamiento `env -i`, timeouts en montajes (`timeout 5 mount`), contador de sesiones en `/dev/chroot_sessions` con **desmontaje automático seguro al cerrar la última sesión** y subcomandos `status`, `stop`/`umount`, `exec`.
 - Ejecución directa en contexto `su` para evitar denegaciones SELinux en Android 10–15.
+- Cierre suave de sesiones (`finishGracefully`) enviando `SIGHUP`/`SIGTERM` antes del fallback `SIGKILL` al cerrar pestañas con `✕` o pulsar `Salir` en la notificación, permitiendo guardar el historial de `bash` y ejecutar trampas de limpieza.
 
 #### Camino 2: Sin Root (PRoot Integrado en el APK)
 - Incluye `libproot.so`, `libproot_loader.so` y `libproot_loader32.so` (`arm64-v8a` y `armeabi-v7a`) compilados con `targetSdkVersion=28` para permitir ejecución y mapeo binario en almacenamiento interno (`untrusted_app_27`) en Android 10–15.
@@ -108,15 +109,16 @@ El APK resultante se generará en `build/DebianTerm-release.apk`.
 
 ## 🧪 Pruebas Unitarias
 
-La suite [VerifyAll.java](tests/VerifyAll.java) valida en JVM las **8 pruebas clave**:
+La suite [VerifyAll.java](tests/VerifyAll.java) valida en JVM las **9 pruebas clave**:
 1. Salida sincronizada `DECSET 2026` + consultas `DECRQM`.
 2. Modo Pan del teclado sin pérdida de scrollback ni redimensionamiento PTY (`SIGWINCH`).
 3. Parser en vivo del índice LXC (`bookworm` / `trixie`) y verificación `SHA256SUMS`.
-4. Sintaxis (`sh -n`) y aislamiento `env -i` del script de entrada root.
+4. Sintaxis (`sh -n`), aislamiento `env -i`, contador de sesiones y trampa de desmontaje automático del script de entrada root.
 5. Carga de los 5 esquemas de colores en `TerminalColorScheme`.
 6. Evaluador de requisitos mínimos (`SystemRequirements`) en dispositivos con root, sin root (PRoot), poco almacenamiento y Android antiguo.
 7. Extractor tar Java (`TarExtractor`: permisos, symlinks, hardlinks, rutas largas PAX > 120 caracteres, omisión de `/dev/*`, bloqueo de *path traversal* y borrado seguro sin seguir symlinks).
 8. Sintaxis (`sh -n`) y flags del script lanzador PRoot sin root (`ProotManager`).
+9. API de cierre suave de sesiones (`TerminalSession.finishGracefully` con `SIGHUP`/`SIGTERM` y fallback `SIGKILL`).
 
 Para compilarlas y ejecutarlas:
 

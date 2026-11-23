@@ -1,5 +1,6 @@
 import com.debianchroot.term.ChrootInstaller;
 import com.debianchroot.term.ChrootManager;
+import com.debianchroot.term.DebianTermService;
 import com.debianchroot.term.ProotManager;
 import com.debianchroot.term.SystemRequirements;
 import com.debianchroot.term.TarExtractor;
@@ -14,6 +15,8 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.InputStream;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
@@ -28,11 +31,12 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * 1) DECSET 2026 synchronized output + DECRQM query
  * 2) Soft-keyboard main-screen pan without PTY resize / scrollback loss
  * 3) Live LXC Debian bookworm/trixie index & SHA256SUMS parsing
- * 4) Generated /data/local/bin/debian entry script syntax and env isolation
+ * 4) Generated /data/local/bin/debian entry script syntax, session counter & auto-unmount trap
  * 5) Color schemes validation against TerminalColorScheme
  * 6) SystemRequirements evaluation (root, non-root PRoot, low storage, old Android)
  * 7) TarExtractor (permissions, symlinks, hardlinks, PAX long path, dev skip, traversal block, safe delete)
  * 8) Generated PRoot launcher script syntax and flags
+ * 9) Graceful session shutdown API (SIGHUP/SIGTERM -> SIGKILL fallback)
  */
 public final class VerifyAll {
 
@@ -96,7 +100,8 @@ public final class VerifyAll {
         testSystemRequirements();
         testTarExtractor();
         testProotLauncherScript();
-        System.out.println("ALL 8 VERIFICATION TESTS PASSED.");
+        testGracefulCloseApi();
+        System.out.println("ALL 9 VERIFICATION TESTS PASSED.");
     }
 
     private static void testDecset2026() {
@@ -172,6 +177,18 @@ public final class VerifyAll {
         check(script.contains("env -i"), "Entry script must use env -i");
         check(!script.contains("TERMUX_"), "Entry script must not pass TERMUX_ variables");
         check(script.contains("CHROOT='/data/local/debian'"), "Entry script must set CHROOT='/data/local/debian'");
+        check(script.contains("SESSION_DIR='/dev/chroot_sessions'"), "Default chroot must use /dev/chroot_sessions");
+        check(script.contains("cleanup_session"), "Entry script must define cleanup_session");
+        check(script.contains("CLEANED_UP"), "Entry script must include CLEANED_UP guard");
+        check(script.contains("trap cleanup_session EXIT HUP INT TERM"), "Entry script must trap EXIT HUP INT TERM");
+        check(script.contains("umount_chroot"), "Entry script must call umount_chroot");
+        // Interactive block must NOT exec env -i so trap/cleanup runs on bash exit
+        String tail = script.substring(script.indexOf("trap cleanup_session"));
+        check(!tail.contains("exec env -i"), "Interactive launch must not use exec env -i");
+
+        String customScript = ChrootManager.generateEntryScript("/data/local/deb2");
+        check(customScript.contains("SESSION_DIR='/dev/chroot_sessions/_data_local_deb2'"),
+            "Custom chroot must isolate SESSION_DIR per path");
 
         Path tmp = Paths.get("/tmp/test-debian-script.sh");
         Files.write(tmp, script.getBytes(StandardCharsets.UTF_8));
@@ -182,7 +199,7 @@ public final class VerifyAll {
         } finally {
             Files.deleteIfExists(tmp);
         }
-        System.out.println("[PASS] Test 4: Generated /data/local/bin/debian syntax (sh -n) and env isolation");
+        System.out.println("[PASS] Test 4: Generated root entry script syntax (sh -n), session counter & auto-unmount trap");
     }
 
     private static void testColorSchemes() {
@@ -395,6 +412,26 @@ public final class VerifyAll {
             Files.deleteIfExists(tmp);
         }
         System.out.println("[PASS] Test 8: Generated PRoot launcher script syntax (sh -n) and flags");
+    }
+
+    private static void testGracefulCloseApi() throws Exception {
+        Method finishGracefully = TerminalSession.class.getMethod("finishGracefully", long.class);
+        check(Modifier.isPublic(finishGracefully.getModifiers())
+            && finishGracefully.getReturnType() == void.class,
+            "finishGracefully(long) must be public void");
+
+        Method finishIfRunning = TerminalSession.class.getMethod("finishIfRunning");
+        check(Modifier.isPublic(finishIfRunning.getModifiers())
+            && finishIfRunning.getReturnType() == void.class,
+            "finishIfRunning() must be public void");
+
+        Method removeSession = DebianTermService.class.getMethod("removeSession", TerminalSession.class);
+        check(Modifier.isPublic(removeSession.getModifiers()), "DebianTermService.removeSession must be public");
+
+        Method stopAll = DebianTermService.class.getMethod("stopAllSessionsAndSelf");
+        check(Modifier.isPublic(stopAll.getModifiers()), "DebianTermService.stopAllSessionsAndSelf must be public");
+
+        System.out.println("[PASS] Test 9: Graceful session shutdown API (SIGHUP/SIGTERM -> SIGKILL fallback)");
     }
 
     private static String fetchText(String urlStr) throws Exception {

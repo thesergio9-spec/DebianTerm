@@ -31,6 +31,7 @@ public final class DebianTermService extends Service {
     public static final String ACTION_TOGGLE_WAKELOCK = "com.debianchroot.term.ACTION_TOGGLE_WAKELOCK";
 
     private static final int DEFAULT_TRANSCRIPT_ROWS = 4000;
+    private static final long GRACEFUL_EXIT_TIMEOUT_MS = 1500L;
 
     public final class LocalBinder extends Binder {
         public DebianTermService getService() {
@@ -49,6 +50,7 @@ public final class DebianTermService extends Service {
     private boolean mClientVisible = false;
     private int mSessionCounter = 0;
     private ServiceEventListener mEventListener;
+    private final android.os.Handler mMainHandler = new android.os.Handler(android.os.Looper.getMainLooper());
 
     @Override
     public void onCreate() {
@@ -63,9 +65,6 @@ public final class DebianTermService extends Service {
             String action = intent.getAction();
             if (ACTION_STOP_ALL.equals(action)) {
                 stopAllSessionsAndSelf();
-                if (mEventListener != null) {
-                    mEventListener.onServiceStopAllRequested();
-                }
                 return START_NOT_STICKY;
             } else if (ACTION_TOGGLE_WAKELOCK.equals(action)) {
                 toggleWakeLock();
@@ -84,7 +83,7 @@ public final class DebianTermService extends Service {
     public void onDestroy() {
         releaseWakeLock();
         for (TerminalSession s : new ArrayList<>(mSessions)) {
-            s.finishIfRunning();
+            s.finishGracefully(500L);
         }
         mSessions.clear();
         mSessionNames.clear();
@@ -202,7 +201,7 @@ public final class DebianTermService extends Service {
 
     public void removeSession(TerminalSession session) {
         if (session == null) return;
-        session.finishIfRunning();
+        session.finishGracefully(GRACEFUL_EXIT_TIMEOUT_MS);
         mSessions.remove(session);
         mSessionNames.remove(session);
         updateNotification();
@@ -214,14 +213,54 @@ public final class DebianTermService extends Service {
     }
 
     public void stopAllSessionsAndSelf() {
-        for (TerminalSession s : new ArrayList<>(mSessions)) {
-            s.finishIfRunning();
-        }
+        final List<TerminalSession> toClose = new ArrayList<>(mSessions);
         mSessions.clear();
         mSessionNames.clear();
         releaseWakeLock();
-        stopForeground(true);
-        stopSelf();
+
+        for (TerminalSession s : toClose) {
+            s.finishGracefully(GRACEFUL_EXIT_TIMEOUT_MS);
+        }
+
+        if (toClose.isEmpty()) {
+            stopForeground(true);
+            stopSelf();
+            if (mEventListener != null) {
+                mEventListener.onServiceStopAllRequested();
+            }
+            return;
+        }
+
+        Thread waiter = new Thread(() -> {
+            long deadline = System.currentTimeMillis() + GRACEFUL_EXIT_TIMEOUT_MS + 250L;
+            while (System.currentTimeMillis() < deadline) {
+                boolean anyAlive = false;
+                for (TerminalSession s : toClose) {
+                    if (s.isRunning()) {
+                        anyAlive = true;
+                        break;
+                    }
+                }
+                if (!anyAlive) {
+                    break;
+                }
+                try {
+                    Thread.sleep(50L);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+            mMainHandler.post(() -> {
+                stopForeground(true);
+                stopSelf();
+                if (mEventListener != null) {
+                    mEventListener.onServiceStopAllRequested();
+                }
+            });
+        }, "DebianTermGracefulStopAll");
+        waiter.setDaemon(true);
+        waiter.start();
     }
 
     public boolean isWakeLockHeld() {
