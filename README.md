@@ -56,7 +56,7 @@ Barra inferior de teclas configurables diseñada para productividad en línea de
 ## 🛠️ Estructura del Proyecto
 
 ```
-debian-termux/
+DebianTerm/
 ├── AndroidManifest.xml          # Configuración del paquete com.debianchroot.term
 ├── res/                         # Iconos vectoriales, colores, estilos y cadenas
 ├── src/
@@ -78,8 +78,8 @@ El proyecto está diseñado para compilarse tanto en PC como directamente dentro
 
 ```bash
 # 1. Clonar el repositorio
-git clone <URL_REPOSITORIO>
-cd debian-termux
+git clone https://github.com/thesergio9-spec/DebianTerm.git
+cd DebianTerm
 
 # 2. Descargar librerías y componentes base
 ./setup-deps.sh
