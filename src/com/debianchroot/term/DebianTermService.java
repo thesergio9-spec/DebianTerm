@@ -143,7 +143,30 @@ public final class DebianTermService extends Service {
             "fi";
 
         String shCmd = "exec " + ChrootManager.shellQuote(suBin) + " -c " + ChrootManager.shellQuote(rootCmd);
-        return createRawSession("/system/bin/sh", shCmd, "Debian #" + (++mSessionCounter), client);
+        return createRawSession("/system/bin/sh", shCmd, "Debian 12 (Root) #" + (++mSessionCounter), client);
+    }
+
+    public TerminalSession createProotDebianSession(TerminalSessionClient client) {
+        ensureForegroundStarted();
+        java.io.File script = ProotManager.getLauncherScript(this);
+        java.io.File rootfs = ProotManager.getRootfsDir(this);
+        if (!rootfs.isDirectory() || !new java.io.File(rootfs, "bin/bash").exists()) {
+            String msgCmd = "echo 'Debian 12 (Sin Root) no está instalado en " + rootfs.getAbsolutePath()
+                + ". Vuelve al panel de inicio para instalarlo.'; exec /system/bin/sh";
+            return createRawSession("/system/bin/sh", msgCmd, "Debian 12 (Sin Root) #" + (++mSessionCounter), client);
+        }
+        try {
+            if (!script.exists() || !script.canExecute()) {
+                boolean noSeccomp = new TerminalSettings(this).isProotDisableSeccomp();
+                script = ProotManager.installLauncherScript(this, noSeccomp);
+            }
+        } catch (java.io.IOException e) {
+            String errCmd = "echo " + ChrootManager.shellQuote("Error preparando script PRoot: " + e.getMessage())
+                + "; exec /system/bin/sh";
+            return createRawSession("/system/bin/sh", errCmd, "Debian 12 (Sin Root) #" + (++mSessionCounter), client);
+        }
+        String shCmd = "exec " + ChrootManager.shellQuote(script.getAbsolutePath());
+        return createRawSession("/system/bin/sh", shCmd, "Debian 12 (Sin Root) #" + (++mSessionCounter), client);
     }
 
     public TerminalSession createAndroidRootSession(TerminalSessionClient client) {
@@ -151,6 +174,11 @@ public final class DebianTermService extends Service {
         String suBin = ChrootManager.resolveWorkingSuPath();
         String shCmd = "exec " + ChrootManager.shellQuote(suBin);
         return createRawSession("/system/bin/sh", shCmd, "Android root #" + (++mSessionCounter), client);
+    }
+
+    public TerminalSession createAndroidShellSession(TerminalSessionClient client) {
+        ensureForegroundStarted();
+        return createRawSession("/system/bin/sh", "exec /system/bin/sh", "Android sh #" + (++mSessionCounter), client);
     }
 
     private TerminalSession createRawSession(String shellPath, String shCommand, String defaultName, TerminalSessionClient client) {

@@ -11,7 +11,13 @@ XZ_JAR="$ROOT_DIR/libs/xz-1.9.jar"
 
 for f in "$ANDROID_JAR" "$D8_JAR" "$ANNOTATION_JAR" "$XZ_JAR" \
          "$ROOT_DIR/jniLibs/arm64-v8a/libtermux.so" \
-         "$ROOT_DIR/jniLibs/armeabi-v7a/libtermux.so"; do
+         "$ROOT_DIR/jniLibs/arm64-v8a/libproot.so" \
+         "$ROOT_DIR/jniLibs/arm64-v8a/libproot_loader.so" \
+         "$ROOT_DIR/jniLibs/arm64-v8a/libproot_loader32.so" \
+         "$ROOT_DIR/jniLibs/armeabi-v7a/libtermux.so" \
+         "$ROOT_DIR/jniLibs/armeabi-v7a/libproot.so" \
+         "$ROOT_DIR/jniLibs/armeabi-v7a/libproot_loader.so" \
+         "$ROOT_DIR/jniLibs/armeabi-v7a/libproot_loader32.so"; do
   if [ ! -f "$f" ]; then
     echo "ERROR: Falta dependencia requerida: $f (ejecuta ./setup-deps.sh primero)" >&2
     exit 1
@@ -61,9 +67,13 @@ src_apk = "build/unaligned.apk"
 tmp_apk = "build/unaligned.tmp.apk"
 inject = {
     "classes.dex": ("build/dex/classes.dex", zipfile.ZIP_DEFLATED),
-    "lib/arm64-v8a/libtermux.so": ("jniLibs/arm64-v8a/libtermux.so", zipfile.ZIP_STORED),
-    "lib/armeabi-v7a/libtermux.so": ("jniLibs/armeabi-v7a/libtermux.so", zipfile.ZIP_STORED),
 }
+for abi in ("arm64-v8a", "armeabi-v7a"):
+    abi_dir = os.path.join("jniLibs", abi)
+    if os.path.isdir(abi_dir):
+        for fname in sorted(os.listdir(abi_dir)):
+            if fname.endswith(".so"):
+                inject[f"lib/{abi}/{fname}"] = (os.path.join(abi_dir, fname), zipfile.ZIP_STORED)
 for i in range(2, 10):
     dex_p = f"build/dex/classes{i}.dex"
     if os.path.exists(dex_p):

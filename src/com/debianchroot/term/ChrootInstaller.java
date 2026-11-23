@@ -131,6 +131,17 @@ public final class ChrootInstaller {
         AtomicBoolean cancelled,
         ProgressListener listener
     ) {
+        return installRoot(context, release, chrootPath, scriptPath, cancelled, listener);
+    }
+
+    public static InstallResult installRoot(
+        Context context,
+        String release,
+        String chrootPath,
+        String scriptPath,
+        AtomicBoolean cancelled,
+        ProgressListener listener
+    ) {
         File cacheTarXz = new File(context.getCacheDir(), "debian-rootfs.tar.xz");
         try {
             if (cancelled.get()) return new InstallResult(false, "Instalación cancelada.");
@@ -143,54 +154,10 @@ public final class ChrootInstaller {
             }
             listener.onLog("Root verificado (" + suBin + ")");
 
-            String arch = detectDebianArch();
-            listener.onLog("Arquitectura detectada: " + arch + " | Debian: " + release);
-
-            if (cancelled.get()) return new InstallResult(false, "Instalación cancelada.");
-
-            listener.onProgress(6, "Consultando índice oficial LinuxContainers...");
-            String indexText = fetchString(LXC_INDEX_URL, cancelled);
-            String imagePath = parseLxcIndex(indexText, release, arch);
-            if (imagePath == null) {
-                return new InstallResult(false, "No se encontró imagen Debian " + release + " (" + arch + ") en el índice.");
+            InstallResult dlRes = downloadVerifiedRootfs(release, cacheTarXz, cancelled, listener);
+            if (!dlRes.success) {
+                return dlRes;
             }
-            String imageDirUrl = LXC_BASE_URL + imagePath;
-            listener.onLog("Imagen seleccionada: " + imageDirUrl);
-
-            if (cancelled.get()) return new InstallResult(false, "Instalación cancelada.");
-
-            listener.onProgress(10, "Descargando SHA256SUMS...");
-            String shaText = fetchString(imageDirUrl + "SHA256SUMS", cancelled);
-            String expectedSha = parseSha256Sums(shaText, "rootfs.tar.xz");
-            if (expectedSha == null) {
-                return new InstallResult(false, "No se encontró hash SHA-256 para rootfs.tar.xz.");
-            }
-            listener.onLog("SHA-256 esperado: " + expectedSha.substring(0, 16) + "...");
-
-            listener.onProgress(12, "Descargando rootfs.tar.xz...");
-            String rootfsUrl = imageDirUrl + "rootfs.tar.xz";
-            downloadFile(rootfsUrl, cacheTarXz, cancelled, (downloaded, total) -> {
-                if (total > 0) {
-                    int pct = 12 + (int) ((downloaded * 46L) / total);
-                    String msg = String.format(Locale.US, "Descargando rootfs: %.1f / %.1f MB",
-                        downloaded / (1024.0 * 1024.0), total / (1024.0 * 1024.0));
-                    listener.onProgress(Math.min(58, pct), msg);
-                } else {
-                    String msg = String.format(Locale.US, "Descargando rootfs: %.1f MB",
-                        downloaded / (1024.0 * 1024.0));
-                    listener.onProgress(35, msg);
-                }
-            });
-            if (cancelled.get()) return new InstallResult(false, "Instalación cancelada.");
-            listener.onLog("Descarga completada (" + (cacheTarXz.length() / (1024 * 1024)) + " MB)");
-
-            listener.onProgress(60, "Verificando integridad SHA-256...");
-            String actualSha = computeFileSha256(cacheTarXz, cancelled);
-            if (cancelled.get()) return new InstallResult(false, "Instalación cancelada.");
-            if (!expectedSha.equalsIgnoreCase(actualSha)) {
-                return new InstallResult(false, "Error SHA-256: esperado " + expectedSha + ", obtenido " + actualSha);
-            }
-            listener.onLog("Verificación SHA-256 correcta.");
 
             listener.onProgress(65, "Preparando directorio " + chrootPath + "...");
             String qChroot = ChrootManager.shellQuote(chrootPath);
@@ -223,7 +190,7 @@ public final class ChrootInstaller {
             }
             listener.onLog("Script " + scriptPath + " listo.");
 
-            listener.onProgress(100, "Debian " + release + " instalado correctamente.");
+            listener.onProgress(100, "Debian " + release + " instalado correctamente (Con Root).");
             return new InstallResult(true, "Debian " + release + " instalado en " + chrootPath);
         } catch (Exception e) {
             if (cancelled.get()) {
@@ -234,26 +201,167 @@ public final class ChrootInstaller {
             return new InstallResult(false, msg);
         } finally {
             if (cacheTarXz.exists()) {
-                // Always clean up temporary downloaded archive
                 //noinspection ResultOfMethodCallIgnored
                 cacheTarXz.delete();
             }
         }
     }
 
+    public static InstallResult installProot(
+        Context context,
+        String release,
+        AtomicBoolean cancelled,
+        ProgressListener listener
+    ) {
+        File cacheTarXz = new File(context.getCacheDir(), "debian-proot-rootfs.tar.xz");
+        File rootfsDir = ProotManager.getRootfsDir(context);
+        try {
+            if (cancelled.get()) return new InstallResult(false, "Instalación cancelada.");
+
+            listener.onProgress(2, "Verificando motor PRoot integrado...");
+            File prootBin = ProotManager.getProotBinary(context);
+            File loaderBin = ProotManager.getLoaderBinary(context);
+            if (!prootBin.exists() || !prootBin.canExecute() || !loaderBin.exists() || !loaderBin.canExecute()) {
+                return new InstallResult(false, "Motor PRoot no disponible o sin permisos de ejecución en "
+                    + context.getApplicationInfo().nativeLibraryDir);
+            }
+            listener.onLog("PRoot verificado: " + prootBin.getAbsolutePath());
+
+            InstallResult dlRes = downloadVerifiedRootfs(release, cacheTarXz, cancelled, listener);
+            if (!dlRes.success) {
+                return dlRes;
+            }
+
+            listener.onProgress(63, "Limpiando directorio destino PRoot...");
+            TarExtractor.deleteRecursivelyNoFollow(rootfsDir);
+            if (!rootfsDir.mkdirs()) {
+                return new InstallResult(false, "No se pudo crear el directorio interno " + rootfsDir);
+            }
+            TarExtractor.setMode(rootfsDir, 0755);
+
+            listener.onProgress(65, "Descomprimiendo Debian " + release + " (sin root)...");
+            listener.onLog("Extrayendo rootfs en " + rootfsDir.getAbsolutePath() + " (puede tardar 1-2 min)...");
+            final long totalBytes = Math.max(1L, cacheTarXz.length());
+            TarExtractor.extractTarXz(cacheTarXz, rootfsDir, true, cancelled, (entries, bytesRead) -> {
+                int pct = 65 + (int) ((bytesRead * 25L) / totalBytes);
+                listener.onProgress(Math.min(90, pct),
+                    "Extrayendo archivos sin root (" + entries + " entradas)...");
+            });
+            if (cancelled.get()) return new InstallResult(false, "Instalación cancelada.");
+            listener.onLog("Extracción PRoot finalizada.");
+
+            listener.onProgress(92, "Configurando DNS, APT y /proc virtual...");
+            ProotManager.configureRootfs(rootfsDir);
+            listener.onLog("Configuración post-instalación PRoot aplicada.");
+
+            listener.onProgress(95, "Verificando compatibilidad seccomp de PRoot...");
+            boolean disableSeccomp = false;
+            if (!ProotManager.testProotRuntime(context, false)) {
+                listener.onLog("Aviso: probando PRoot con PROOT_NO_SECCOMP=1...");
+                if (ProotManager.testProotRuntime(context, true)) {
+                    disableSeccomp = true;
+                    listener.onLog("Compatibilidad PROOT_NO_SECCOMP=1 activada automáticamente.");
+                } else {
+                    listener.onLog("Aviso: PRoot /bin/true no devolvió 0 en la prueba rápida.");
+                }
+            } else {
+                listener.onLog("Prueba PRoot (/bin/true) exitosa con seccomp habilitado.");
+            }
+            new TerminalSettings(context).setProotDisableSeccomp(disableSeccomp);
+
+            listener.onProgress(97, "Generando script lanzador PRoot...");
+            File script = ProotManager.installLauncherScript(context, disableSeccomp);
+            listener.onLog("Lanzador generado: " + script.getAbsolutePath());
+
+            listener.onProgress(100, "Debian " + release + " listo en modo Sin Root (PRoot).");
+            return new InstallResult(true, "Debian " + release + " (PRoot) instalado en " + rootfsDir.getAbsolutePath());
+        } catch (Exception e) {
+            if (cancelled.get()) {
+                return new InstallResult(false, "Instalación cancelada por el usuario.");
+            }
+            String msg = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
+            listener.onLog("ERROR: " + msg);
+            return new InstallResult(false, msg);
+        } finally {
+            if (cacheTarXz.exists()) {
+                //noinspection ResultOfMethodCallIgnored
+                cacheTarXz.delete();
+            }
+        }
+    }
+
+    private static InstallResult downloadVerifiedRootfs(
+        String release,
+        File cacheTarXz,
+        AtomicBoolean cancelled,
+        ProgressListener listener
+    ) throws Exception {
+        String arch = detectDebianArch();
+        listener.onLog("Arquitectura detectada: " + arch + " | Debian: " + release);
+
+        if (cancelled.get()) return new InstallResult(false, "Instalación cancelada.");
+
+        listener.onProgress(6, "Consultando índice oficial LinuxContainers...");
+        String indexText = fetchString(LXC_INDEX_URL, cancelled);
+        String imagePath = parseLxcIndex(indexText, release, arch);
+        if (imagePath == null) {
+            return new InstallResult(false, "No se encontró imagen Debian " + release + " (" + arch + ") en el índice.");
+        }
+        String imageDirUrl = LXC_BASE_URL + imagePath;
+        listener.onLog("Imagen seleccionada: " + imageDirUrl);
+
+        if (cancelled.get()) return new InstallResult(false, "Instalación cancelada.");
+
+        listener.onProgress(10, "Descargando SHA256SUMS...");
+        String shaText = fetchString(imageDirUrl + "SHA256SUMS", cancelled);
+        String expectedSha = parseSha256Sums(shaText, "rootfs.tar.xz");
+        if (expectedSha == null) {
+            return new InstallResult(false, "No se encontró hash SHA-256 para rootfs.tar.xz.");
+        }
+        listener.onLog("SHA-256 esperado: " + expectedSha.substring(0, 16) + "...");
+
+        listener.onProgress(12, "Descargando rootfs.tar.xz...");
+        String rootfsUrl = imageDirUrl + "rootfs.tar.xz";
+        downloadFile(rootfsUrl, cacheTarXz, cancelled, (downloaded, total) -> {
+            if (total > 0) {
+                int pct = 12 + (int) ((downloaded * 46L) / total);
+                String msg = String.format(Locale.US, "Descargando rootfs: %.1f / %.1f MB",
+                    downloaded / (1024.0 * 1024.0), total / (1024.0 * 1024.0));
+                listener.onProgress(Math.min(58, pct), msg);
+            } else {
+                String msg = String.format(Locale.US, "Descargando rootfs: %.1f MB",
+                    downloaded / (1024.0 * 1024.0));
+                listener.onProgress(35, msg);
+            }
+        });
+        if (cancelled.get()) return new InstallResult(false, "Instalación cancelada.");
+        listener.onLog("Descarga completada (" + (cacheTarXz.length() / (1024 * 1024)) + " MB)");
+
+        listener.onProgress(60, "Verificando integridad SHA-256...");
+        String actualSha = computeFileSha256(cacheTarXz, cancelled);
+        if (cancelled.get()) return new InstallResult(false, "Instalación cancelada.");
+        if (!expectedSha.equalsIgnoreCase(actualSha)) {
+            return new InstallResult(false, "Error SHA-256: esperado " + expectedSha + ", obtenido " + actualSha);
+        }
+        listener.onLog("Verificación SHA-256 correcta.");
+        return new InstallResult(true, "OK");
+    }
+
     private static String buildPostInstallCommand(String chrootPath) {
         String qChroot = ChrootManager.shellQuote(chrootPath);
         return
             "CH=" + qChroot + "; " +
-            "mkdir -p \"$CH/dev\" \"$CH/dev/pts\" \"$CH/proc\" \"$CH/sys\" \"$CH/tmp\" \"$CH/dev/shm\" \"$CH/sdcard\" \"$CH/external_sd\" \"$CH/etc/apt/apt.conf.d\" && " +
+            "mkdir -p \"$CH/dev\" \"$CH/dev/pts\" \"$CH/proc\" \"$CH/sys\" \"$CH/tmp\" \"$CH/dev/shm\" \"$CH/sdcard\" \"$CH/external_sd\" \"$CH/etc/apt/apt.conf.d\" \"$CH/usr/sbin\" && " +
             "chmod 1777 \"$CH/tmp\" \"$CH/dev/shm\" && " +
+            "rm -f \"$CH/etc/resolv.conf\" && " +
             "printf 'nameserver 1.1.1.1\\nnameserver 8.8.8.8\\n' > \"$CH/etc/resolv.conf\" && " +
             "if ! grep -qs 'localhost' \"$CH/etc/hosts\" 2>/dev/null; then printf '127.0.0.1 localhost\\n::1 localhost\\n' > \"$CH/etc/hosts\"; fi && " +
             "for grp in 'aid_inet:x:3003:root' 'aid_net_raw:x:3004:root' 'aid_admin:x:3005:root' 'aid_sdcard_rw:x:1015:root' 'aid_everybody:x:9997:root'; do " +
             "  gname=$(printf '%s' \"$grp\" | cut -d: -f1); " +
             "  grep -qs \"^${gname}:\" \"$CH/etc/group\" || printf '%s\\n' \"$grp\" >> \"$CH/etc/group\"; " +
             "done && " +
-            "printf 'APT::Sandbox::User \"root\";\\n' > \"$CH/etc/apt/apt.conf.d/99android-chroot\"";
+            "printf 'APT::Sandbox::User \"root\";\\n' > \"$CH/etc/apt/apt.conf.d/99android-chroot\" && " +
+            "if [ ! -e \"$CH/usr/sbin/policy-rc.d\" ]; then printf '#!/bin/sh\\nexit 101\\n' > \"$CH/usr/sbin/policy-rc.d\" && chmod 755 \"$CH/usr/sbin/policy-rc.d\"; fi";
     }
 
     private static void extractTarXzToRoot(

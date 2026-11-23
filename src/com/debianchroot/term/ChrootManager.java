@@ -46,6 +46,7 @@ public final class ChrootManager {
     public static final class ChrootStatus {
         public boolean hasRoot;
         public String suPath = "su";
+        public String suVersion = "";
         public boolean rootfsExists;
         public String debianPrettyName = "";
         public boolean entryScriptExists;
@@ -112,7 +113,12 @@ public final class ChrootManager {
         Process process = null;
         try {
             process = createProcessBuilder(args).start();
-            return waitAndCollect(process, null, timeoutSec);
+            ExecResult res = waitAndCollect(process, null, timeoutSec);
+            if (mountMaster && !res.isOk()) {
+                // Fallback for su implementations where -mm returns non-zero (e.g. KernelSU / APatch)
+                return execWithBinary(suBin, false, cmd, timeoutSec);
+            }
+            return res;
         } catch (IOException e) {
             if (mountMaster) {
                 // Fallback for su implementations without -mm (e.g. KernelSU / APatch)
@@ -221,14 +227,45 @@ public final class ChrootManager {
 
     public static ChrootStatus inspectStatus(String chrootPath, String scriptPath) {
         ChrootStatus status = new ChrootStatus();
-        String suBin = resolveWorkingSuPath();
-        status.suPath = suBin;
+        String workingSu = null;
+        String detectedVer = "";
 
-        ExecResult idRes = execWithBinary(suBin, false, "id -u", 6);
-        status.hasRoot = idRes.exitCode == 0 && idRes.stdout.trim().equals("0");
-        if (!status.hasRoot) {
+        List<String> candidates = new ArrayList<>();
+        for (String c : SU_CANDIDATES) {
+            candidates.add(c);
+        }
+        candidates.add("su");
+
+        for (String candidate : candidates) {
+            String qCand = shellQuote(candidate);
+            String checkCmd =
+                "if [ \"$(id -u)\" = '0' ]; then " +
+                "  echo 'ROOT_OK'; " +
+                "  (" + qCand + " -v 2>/dev/null || " + qCand + " --version 2>/dev/null || true) | head -n 1; " +
+                "fi";
+            ExecResult res = execWithBinary(candidate, false, checkCmd, 6);
+            if (res.exitCode == 0 && res.stdout != null) {
+                String[] lines = res.stdout.split("\\r?\\n");
+                if (lines.length > 0 && "ROOT_OK".equals(lines[0].trim())) {
+                    workingSu = candidate;
+                    if (lines.length > 1) {
+                        detectedVer = lines[1].trim();
+                    }
+                    break;
+                }
+            }
+        }
+
+        if (workingSu == null) {
+            status.suPath = detectSuPath();
+            status.hasRoot = false;
             return status;
         }
+
+        status.hasRoot = true;
+        status.suPath = workingSu;
+        status.suVersion = detectedVer;
+        String suBin = workingSu;
 
         String qChroot = shellQuote(chrootPath);
         String qScript = shellQuote(scriptPath);
@@ -242,7 +279,11 @@ public final class ChrootManager {
             "else echo 'ROOTFS=0'; fi; " +
             "if [ -x " + qScript + " ]; then echo 'SCRIPT=1'; else echo 'SCRIPT=0'; fi; " +
             "if [ -d " + qChroot + " ] && [ " + qChroot + " != '/' ] && [ " + qChroot + " != '/data' ]; then " +
-            "  du -sh " + qChroot + " 2>/dev/null | awk '{print \"SIZE=\" $1}' || true; " +
+            "  if command -v timeout >/dev/null 2>&1; then " +
+            "    timeout 2 du -sh " + qChroot + " 2>/dev/null | awk '{print \"SIZE=\" $1}' || true; " +
+            "  else " +
+            "    du -sh " + qChroot + " 2>/dev/null | awk '{print \"SIZE=\" $1}' || true; " +
+            "  fi; " +
             "fi";
 
         ExecResult probe = execWithBinary(suBin, false, probeCmd, 10);

@@ -1,55 +1,58 @@
 # DebianTerm
 
-**DebianTerm** es una app ligera de terminal para Android basada en el motor y teclado de Termux (`terminal-emulator` y `terminal-view`), diseñada específicamente para operar como un entorno e instalador de **Debian Chroot** completo y de alto rendimiento en dispositivos Android con acceso root (Magisk / KernelSU / APatch).
+**DebianTerm** (v2.0.0) es un **instalador completo de Debian 12 (Bookworm)** y emulador de terminal para Android basado en el motor y teclado de Termux (`terminal-emulator` y `terminal-view`), ahora reestructurado con **verificación de requerimientos mínimos al iniciar** y **dos caminos de ejecución totalmente funcionales**:
 
-Coexiste de forma independiente junto a cualquier instalación de Termux oficial (`com.termux`), usando su propio identificador de paquete (`com.debianchroot.term`).
+1. **Camino 1 — Con Root (Chroot Nativo)**: máximo rendimiento del kernel Linux y montajes reales para dispositivos con Magisk, KernelSU o APatch.
+2. **Camino 2 — Sin Root (PRoot Integrado)**: motor `PRoot` empaquetado directamente en el APK (`arm64-v8a` y `armeabi-v7a`), **100% independiente de Termux**, para dispositivos sin acceso root.
+
+Coexiste de forma independiente junto a Termux (`com.termux`) usando su propio paquete (`com.debianchroot.term`) y sin modificar instalaciones existentes en `/data/local/debian`.
 
 ---
 
-## 🚀 Características Principales
+## 📥 Descarga Rápida
 
-### 1. Corrección del "Rebobinado" al Abrir/Cerrar el Teclado
-En emuladores de terminal móviles convencionales, al abrir o cerrar el teclado en pantalla el sistema redimensiona el layout disparando un `SIGWINCH` al proceso hijo y forzando a la terminal a recalcular filas y redibujar el buffer histórico desde el principio.
+Descarga el APK compilado desde la última Release:
+- **[DebianTerm.apk (v2.0.0)](https://github.com/thesergio9-spec/DebianTerm/releases/download/v2.0.0/DebianTerm.apk)**
 
-DebianTerm soluciona este comportamiento incorporando:
-- **Modo Pan sin `SIGWINCH` (`soft-keyboard-pan-main-screen`)**: Desacopla la ventana visible (`visualRows`) de las dimensiones reales del PTY en la pantalla principal. Al desplegar el teclado táctil, el tamaño de líneas del shell no se destruye ni se reenvían señales de tamaño erróneas a CLI interactivas (Hermes, Claude, Vim, prompts enriquecidos).
-- **Salida Sincronizada (`DECSET 2026`)**: Soporte para `CSI ? 2026 h/l` y `DECRQM`, permitiendo frames atómicos y erradicando el parpadeo de texto intermedio.
-- **Scrollback Anclado a Filas de Documento**: Desplazamiento ultra suave con `OverScroller` sub-pixel y retención exacta de la posición de lectura.
+---
 
-### 2. Teclado Extra Estilo Termux
-Barra inferior de teclas configurables diseñada para productividad en línea de comandos:
-- **Modo Completo (2 filas)**:
-  - Fila 1: `ESC` (`~`), `/` (`|`), `-` (`_`), `HOME`, `▲`, `END`, `PGUP`
-  - Fila 2: `TAB` (`S-TAB`), `CTRL`, `ALT`, `◄`, `▼`, `►`, `PGDN`
-- **Modo Compacto (1 fila)** y **Modo Oculto**.
-- **Modificadores Inteligentes (`CTRL` / `ALT`)**:
-  - 1 toque: Estado **Latch** (se activa para la siguiente tecla y se libera automáticamente).
-  - 2 toques / Pulsación larga: Estado **Locked** (fijo con indicador visual `CTRL•`).
-- **Auto-repetición continua** en teclas de dirección y paginación.
-- **Respuesta háptica** configurable.
+## 🚀 Características Principales (v2.0.0)
 
-### 3. Instalador y Gestor de Debian Chroot Integrado
-- **Detección Automática**: Detecta instalaciones existentes en `/data/local/debian` (o la ruta elegida) y abre sesión sin tocar datos existentes.
-- **Descarga e Instalación Oficial en 1 Clic**:
-  - Descarga automática de imágenes oficiales desde `images.linuxcontainers.org` (soporte para **Debian 12 Bookworm** y **Debian 13 Trixie** en arquitecturas `arm64` y `armhf`).
-  - Verificación de integridad vía `SHA256SUMS`.
-  - Extracción directa por streaming `tar.xz` sin necesidad de utilidades externas pesadas.
-  - Configuración automática de DNS (`1.1.1.1`, `8.8.8.8`), hosts y mapeo de grupos de red de Android (`aid_inet` GID 3003, etc.).
-- **Script de Entrada Seguro (`/data/local/bin/debian`)**:
-  - Montajes limpios con timeouts (`timeout 5 mount`) para evitar congelamientos en almacenamiento FUSE.
-  - Aislamiento de variables de entorno (`env -i`) previniendo fugas de entornos Termux u host.
-  - Subcomandos de gestión rápida: `status`, `umount`, `exec <comando>`.
+### 1. Panel de Inicio y Verificación de Requerimientos Mínimos
+Al abrir la app se ejecuta automáticamente un diagnóstico (`SystemRequirements`) antes de instalar o iniciar Debian 12:
+- **Sistema Android**: mínimo Android 7.0 (API 24).
+- **Arquitectura CPU**: `arm64-v8a`, `armeabi-v7a` (y soporte `x86_64`/`x86` según binarios).
+- **Memoria RAM**: mínimo 512 MB (recomendado ≥ 2 GB).
+- **Almacenamiento interno**: mínimo 800 MB libres para nueva instalación (recomendado ≥ 1.5 GB).
+- **Red y Mirror LXC**: comprobación de conectividad hacia `images.linuxcontainers.org`.
+- **Detección Dual**:
+  - **Camino 1 (Root `su`)**: detecta Magisk (`/debug_ramdisk/su`), KernelSU o APatch con su versión.
+  - **Camino 2 (PRoot)**: verifica los binarios integrados `libproot.so` y `libproot_loader.so`.
+- Incluye un interruptor opcional (**"Entrar automáticamente a Debian 12 al iniciar"**) para conservar el panel al inicio o abrir la terminal directamente si ya está instalado.
 
-### 4. Múltiples Sesiones y Personalización
-- **Panel lateral deslizable (Slide Drawer)** para alternar entre sesiones de Debian Chroot y shells locales de Android Root (`su`).
-- **Servicio en primer plano** con notificación persistente para mantener tareas y daemons vivos en segundo plano y toggle de **Wake Lock**.
-- **Zoom fluido con pellizco** táctil para ajustar tamaño de fuente en tiempo real.
-- **5 Esquemas de Color**:
-  - *Debian Dark* (por defecto)
-  - *AMOLED Negro Puro*
-  - *Catppuccin Mocha*
-  - *Gruvbox Dark*
-  - *Solarized Light*
+### 2. Dos Caminos de Instalación y Ejecución Debian 12
+
+#### Camino 1: Con Root (Chroot Nativo)
+- Detecta instalaciones existentes en `/data/local/debian` (o la ruta personalizada) sin sobrescribir ni desmontar destructivamente tus datos.
+- Descarga imágenes oficiales de **Debian 12 (Bookworm)** (o Debian 13 Testing en gestión avanzada) desde `images.linuxcontainers.org` verificadas por `SHA256SUMS`.
+- Genera un script de entrada seguro (`/data/local/bin/debian`) con aislamiento `env -i`, timeouts en montajes (`timeout 5 mount`) y subcomandos `status`, `umount`, `exec`.
+- Ejecución directa en contexto `su` para evitar denegaciones SELinux en Android 10–15.
+
+#### Camino 2: Sin Root (PRoot Integrado en el APK)
+- Incluye `libproot.so`, `libproot_loader.so` y `libproot_loader32.so` (`arm64-v8a` y `armeabi-v7a`) compilados con `targetSdkVersion=28` para permitir ejecución y mapeo binario en almacenamiento interno (`untrusted_app_27`) en Android 10–15.
+- Extractor **100% Java (`TarExtractor`)** con soporte USTAR, PAX, GNU LongName, permisos seguros de usuario, symlinks, hardlinks, exclusión segura de `/dev/*` y protección contra *path traversal*.
+- Entorno preconfigurado en `<filesDir>/debian12-proot`: DNS (`1.1.1.1`, `8.8.8.8`), grupos Android (`aid_inet`), APT (`APT::Sandbox::User "root"`, `policy-rc.d`), detección automática de compatibilidad `PROOT_NO_SECCOMP` y archivos virtuales `/proc/*` para herramientas CLI (`ps`, `top`, `free`, `apt`, `python3`).
+
+### 3. Corrección del "Rebobinado" al Abrir/Cerrar el Teclado
+En emuladores de terminal móviles convencionales, abrir o cerrar el teclado dispara `SIGWINCH`, forzando recálculo de filas y un "rebobinado" visual del buffer histórico:
+- **Modo Pan sin `SIGWINCH` (`soft-keyboard-pan-main-screen`)**: desacopla las filas visibles (`visualRows`) de las filas reales del PTY.
+- **Salida Sincronizada (`DECSET 2026`)**: soporte completo `CSI ? 2026 h/l` y `DECRQM`.
+- **Scrollback Anclado a Filas de Documento**: desplazamiento suave con `OverScroller` manteniendo la posición exacta de lectura.
+
+### 4. Teclado Extra Estilo Termux y Múltiples Sesiones
+- Barra extra con **Modo Completo (2 filas)**, **Modo Compacto (1 fila)** y **Modo Oculto**, teclas `CTRL`/`ALT` con estado *Latch* y *Locked*, auto-repetición y vibración háptica configurable.
+- **Slide Drawer** para alternar entre sesiones Debian 12 (Root / Sin Root), shell Android (`su` / `sh`) y volver al panel de inicio en cualquier momento.
+- **Servicio en primer plano** con notificación persistente, *Wake Lock* y 5 temas de color (*Debian Dark*, *AMOLED*, *Catppuccin Mocha*, *Gruvbox Dark*, *Solarized Light*).
 
 ---
 
@@ -57,16 +60,27 @@ Barra inferior de teclas configurables diseñada para productividad en línea de
 
 ```
 DebianTerm/
-├── AndroidManifest.xml          # Configuración del paquete com.debianchroot.term
+├── AndroidManifest.xml          # Configuración com.debianchroot.term (targetSdk 28 para PRoot)
 ├── res/                         # Iconos vectoriales, colores, estilos y cadenas
 ├── src/
-│   ├── com/debianchroot/term/   # Lógica principal, UI, Servicio, Instalador y Gestor Chroot
-│   ├── com/termux/terminal/     # Motor de emulación PTY con soporte DECSET 2026 y Pan
+│   ├── com/debianchroot/term/
+│   │   ├── MainActivity.java        # Panel de inicio/requisitos + UI terminal + diálogos Root/PRoot
+│   │   ├── SystemRequirements.java  # Verificador de requerimientos mínimos del dispositivo
+│   │   ├── ChrootManager.java       # Detección root (su), inspección chroot y script de entrada
+│   │   ├── ProotManager.java        # Gestión del entorno sin root Debian 12 + lanzador PRoot
+│   │   ├── ChrootInstaller.java     # Descarga LXC + verificación SHA-256 (Root y PRoot)
+│   │   ├── TarExtractor.java        # Extractor tar.xz puro en Java para instalaciones sin root
+│   │   ├── DebianTermService.java   # Servicio en primer plano para sesiones Root, PRoot y sh
+│   │   ├── TerminalSettings.java    # Preferencias persistentes y esquemas de color
+│   │   ├── ExtraKeysBarView.java    # Barra de teclas extra estilo Termux
+│   │   └── SlideDrawerLayout.java   # Menú lateral deslizable de sesiones
+│   ├── com/termux/terminal/     # Motor de emulación PTY con DECSET 2026 y modo Pan
 │   └── com/termux/view/         # Vista terminal con anclaje de scrollback y gestos
 ├── libs/                        # Bibliotecas JAR (annotation-1.5.0, xz-1.9)
-├── jniLibs/                     # Binarios libtermux.so (arm64-v8a, armeabi-v7a)
-├── tests/                       # Suite de pruebas unitarias en JVM (VerifyAll.java)
-├── setup-deps.sh                # Descarga y preparación de código base y librerías
+├── jniLibs/                     # Binarios nativos arm64-v8a y armeabi-v7a:
+│   │                            # libtermux.so, libproot.so, libproot_loader.so, libproot_loader32.so
+├── tests/                       # Suite de 8 pruebas unitarias en JVM (VerifyAll.java)
+├── setup-deps.sh                # Descarga código base Termux, JARs, libtermux.so y binarios PRoot
 └── build.sh                     # Compilación completa (aapt2, javac, d8, zipalign, apksigner)
 ```
 
@@ -74,14 +88,14 @@ DebianTerm/
 
 ## 📦 Compilación desde la Terminal
 
-El proyecto está diseñado para compilarse tanto en PC como directamente dentro de un entorno Linux en Android (incluso en Debian Chroot o Termux):
+El proyecto se compila directamente tanto en PC como en un entorno Linux dentro de Android (Debian Chroot o Termux):
 
 ```bash
 # 1. Clonar el repositorio
 git clone https://github.com/thesergio9-spec/DebianTerm.git
 cd DebianTerm
 
-# 2. Descargar librerías y componentes base
+# 2. Descargar librerías, componentes base y binarios PRoot verificados por SHA-256
 ./setup-deps.sh
 
 # 3. Compilar, alinear y firmar el APK
@@ -94,10 +108,20 @@ El APK resultante se generará en `build/DebianTerm-release.apk`.
 
 ## 🧪 Pruebas Unitarias
 
-Para ejecutar la batería de pruebas en JVM que valida la salida sincronizada `DECSET 2026`, la retención de scrollback en resize del teclado y el parser de índices LXC:
+La suite [VerifyAll.java](tests/VerifyAll.java) valida en JVM las **8 pruebas clave**:
+1. Salida sincronizada `DECSET 2026` + consultas `DECRQM`.
+2. Modo Pan del teclado sin pérdida de scrollback ni redimensionamiento PTY (`SIGWINCH`).
+3. Parser en vivo del índice LXC (`bookworm` / `trixie`) y verificación `SHA256SUMS`.
+4. Sintaxis (`sh -n`) y aislamiento `env -i` del script de entrada root.
+5. Carga de los 5 esquemas de colores en `TerminalColorScheme`.
+6. Evaluador de requisitos mínimos (`SystemRequirements`) en dispositivos con root, sin root (PRoot), poco almacenamiento y Android antiguo.
+7. Extractor tar Java (`TarExtractor`: permisos, symlinks, hardlinks, rutas largas PAX > 120 caracteres, omisión de `/dev/*`, bloqueo de *path traversal* y borrado seguro sin seguir symlinks).
+8. Sintaxis (`sh -n`) y flags del script lanzador PRoot sin root (`ProotManager`).
+
+Para compilarlas y ejecutarlas:
 
 ```bash
-javac -cp build/classes:/opt/android-sdk/android.jar:libs/xz-1.9.jar -d build/test-classes tests/VerifyAll.java
+javac -encoding UTF-8 -cp build/classes:/opt/android-sdk/android.jar:libs/xz-1.9.jar -d build/test-classes tests/VerifyAll.java
 java -cp build/test-classes:build/classes:/opt/android-sdk/android.jar:libs/xz-1.9.jar VerifyAll
 ```
 
@@ -105,4 +129,4 @@ java -cp build/test-classes:build/classes:/opt/android-sdk/android.jar:libs/xz-1
 
 ## 📄 Licencia
 
-Este proyecto reutiliza componentes de código abierto del proyecto [Termux](https://github.com/termux/termux-app) licenciados bajo **GPLv3**.
+Este proyecto reutiliza componentes de código abierto de [Termux](https://github.com/termux/termux-app) y [PRoot](https://github.com/termux/proot) licenciados bajo **GPLv2+ / GPLv3**.

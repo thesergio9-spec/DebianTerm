@@ -21,6 +21,12 @@ public final class TerminalSettings {
     private static final String KEY_CHROOT_PATH = "chroot_path";
     private static final String KEY_ENTRY_SCRIPT_PATH = "entry_script_path";
     private static final String KEY_DEBIAN_RELEASE = "debian_release";
+    private static final String KEY_INSTALL_MODE = "install_mode";
+    private static final String KEY_AUTO_ENTER_TERMINAL = "auto_enter_terminal";
+    private static final String KEY_PROOT_DISABLE_SECCOMP = "proot_disable_seccomp";
+
+    public static final String MODE_ROOT = "root";
+    public static final String MODE_PROOT = "proot";
 
     public static final int MIN_FONT_SIZE_PX = 16;
     public static final int MAX_FONT_SIZE_PX = 68;
@@ -157,6 +163,31 @@ public final class TerminalSettings {
 
     public void setDebianRelease(String release) {
         mPrefs.edit().putString(KEY_DEBIAN_RELEASE, "trixie".equals(release) ? "trixie" : DEFAULT_DEBIAN_RELEASE).apply();
+    }
+
+    public String getInstallMode() {
+        String mode = mPrefs.getString(KEY_INSTALL_MODE, MODE_ROOT);
+        return MODE_PROOT.equals(mode) ? MODE_PROOT : MODE_ROOT;
+    }
+
+    public void setInstallMode(String mode) {
+        mPrefs.edit().putString(KEY_INSTALL_MODE, MODE_PROOT.equals(mode) ? MODE_PROOT : MODE_ROOT).apply();
+    }
+
+    public boolean isAutoEnterTerminal() {
+        return mPrefs.getBoolean(KEY_AUTO_ENTER_TERMINAL, false);
+    }
+
+    public void setAutoEnterTerminal(boolean enabled) {
+        mPrefs.edit().putBoolean(KEY_AUTO_ENTER_TERMINAL, enabled).apply();
+    }
+
+    public boolean isProotDisableSeccomp() {
+        return mPrefs.getBoolean(KEY_PROOT_DISABLE_SECCOMP, false);
+    }
+
+    public void setProotDisableSeccomp(boolean disabled) {
+        mPrefs.edit().putBoolean(KEY_PROOT_DISABLE_SECCOMP, disabled).apply();
     }
 
     private static String sanitizePath(String raw) {
