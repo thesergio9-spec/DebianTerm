@@ -153,27 +153,41 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
             mBound = true;
             mService.setClientVisible(true);
             mService.setEventListener(() -> runOnUiThread(MainActivity.this::finish));
+            mService.pruneCleanlyFinishedSessions();
 
-            for (TerminalSession s : mService.getSessions()) {
+            List<TerminalSession> sessions = mService.getSessions();
+            for (TerminalSession s : sessions) {
                 s.updateTerminalSessionClient(MainActivity.this);
             }
 
-            if (!mService.getSessions().isEmpty()) {
-                TerminalSession target = mCurrentSession;
-                if (target == null || !mService.getSessions().contains(target)) {
-                    target = mService.getSessions().get(mService.getSessions().size() - 1);
+            if (!sessions.isEmpty()) {
+                TerminalSession target = mService.hasSession(mCurrentSession) ? mCurrentSession : null;
+                if (target == null) {
+                    for (int i = sessions.size() - 1; i >= 0; i--) {
+                        if (sessions.get(i).isRunning()) {
+                            target = sessions.get(i);
+                            break;
+                        }
+                    }
+                    if (target == null) {
+                        target = sessions.get(sessions.size() - 1);
+                    }
                 }
                 showTerminalView();
                 switchToSession(target);
                 runRequirementsCheckAsync(false);
             } else {
-                showDashboardView();
+                mCurrentSession = null;
+                showDashboardView(false);
                 if (!mInitialCheckDone) {
                     mInitialCheckDone = true;
                     runRequirementsCheckAsync(true);
+                } else {
+                    runRequirementsCheckAsync(false);
                 }
             }
             refreshDrawerSessions();
+            updatePathButtonsForMode();
         }
 
         @Override
@@ -202,11 +216,6 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         mExtraKeys.setHapticEnabled(mSettings.isHapticEnabled());
 
         Intent svcIntent = new Intent(this, DebianTermService.class);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(svcIntent);
-        } else {
-            startService(svcIntent);
-        }
         bindService(svcIntent, mServiceConnection, Context.BIND_AUTO_CREATE);
     }
 
@@ -215,6 +224,21 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         super.onStart();
         if (mBound && mService != null) {
             mService.setClientVisible(true);
+            mService.pruneCleanlyFinishedSessions();
+            if (mCurrentSession != null && !mService.hasSession(mCurrentSession)) {
+                List<TerminalSession> rem = mService.getSessions();
+                if (!rem.isEmpty()) {
+                    switchToSession(rem.get(rem.size() - 1));
+                } else {
+                    mCurrentSession = null;
+                    mTitleView.setText("DebianTerm");
+                    if (isTerminalVisible()) {
+                        showDashboardView(false);
+                    }
+                }
+            }
+            refreshDrawerSessions();
+            updatePathButtonsForMode();
         }
         if (mTerminalView != null && isTerminalVisible()) {
             mTerminalView.setTerminalCursorBlinkerRate(500);
@@ -296,6 +320,10 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
     }
 
     private void showDashboardView() {
+        showDashboardView(true);
+    }
+
+    private void showDashboardView(boolean triggerCheck) {
         hideSoftKeyboard();
         if (mDrawerLayout != null && mDrawerLayout.isDrawerOpen()) {
             mDrawerLayout.closeDrawer();
@@ -304,8 +332,17 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         if (mDesktopView != null) mDesktopView.setVisibility(View.GONE);
         if (mTerminalView != null) mTerminalView.setTerminalCursorBlinkerState(false, true);
         if (mDashboardView != null) mDashboardView.setVisibility(View.VISIBLE);
+        if (mService != null) {
+            mService.pruneCleanlyFinishedSessions();
+            if (mCurrentSession != null && !mService.hasSession(mCurrentSession)) {
+                mCurrentSession = null;
+            }
+        }
         updateDashboardResumeBar();
-        runRequirementsCheckAsync(false);
+        updatePathButtonsForMode();
+        if (triggerCheck) {
+            runRequirementsCheckAsync(false);
+        }
     }
 
     private void showTerminalView() {
@@ -1113,6 +1150,36 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
     // Session Management (CLI + Graphical Desktop)
     // -------------------------------------------------------------------------
 
+    private void enterOrResumeRootDebianSession() {
+        if (mService == null) return;
+        mSettings.setInstallMode(TerminalSettings.MODE_ROOT);
+        TerminalSession existing = mService.findRunningSession(DebianTermService.SessionKind.DEBIAN_ROOT);
+        if (existing != null) {
+            showTerminalView();
+            switchToSession(existing);
+            refreshDrawerSessions();
+            updatePathButtonsForMode();
+            return;
+        }
+        mService.pruneFinishedSessions(DebianTermService.SessionKind.DEBIAN_ROOT);
+        openNewRootDebianSession();
+    }
+
+    private void enterOrResumeProotDebianSession() {
+        if (mService == null) return;
+        mSettings.setInstallMode(TerminalSettings.MODE_PROOT);
+        TerminalSession existing = mService.findRunningSession(DebianTermService.SessionKind.DEBIAN_PROOT);
+        if (existing != null) {
+            showTerminalView();
+            switchToSession(existing);
+            refreshDrawerSessions();
+            updatePathButtonsForMode();
+            return;
+        }
+        mService.pruneFinishedSessions(DebianTermService.SessionKind.DEBIAN_PROOT);
+        openNewProotDebianSession();
+    }
+
     private void openNewRootDebianSession() {
         if (mService == null) return;
         mSettings.setInstallMode(TerminalSettings.MODE_ROOT);
@@ -1125,6 +1192,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         switchToSession(session);
         refreshDrawerSessions();
         updateDashboardResumeBar();
+        updatePathButtonsForMode();
     }
 
     private void openNewProotDebianSession() {
@@ -1135,6 +1203,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         switchToSession(session);
         refreshDrawerSessions();
         updateDashboardResumeBar();
+        updatePathButtonsForMode();
     }
 
     private void openNewAndroidRootSession() {
@@ -1220,7 +1289,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         if (mService == null) return;
         mSettings.setInstallMode(isRootMode ? TerminalSettings.MODE_ROOT : TerminalSettings.MODE_PROOT);
         disconnectRfbClient();
-        if (mActiveDesktopSession != null && mActiveDesktopSession.isRunning()) {
+        if (mActiveDesktopSession != null && mService.hasSession(mActiveDesktopSession)) {
             mService.removeSession(mActiveDesktopSession);
         }
 
@@ -1372,14 +1441,19 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
             mDrawerDesktopBtn.setVisibility(hasDesktop ? View.VISIBLE : View.GONE);
         }
         if (mDashResumeContainer == null || mDashResumeBtn == null) return;
-        int count = (mService != null) ? mService.getSessions().size() : 0;
+        int running = (mService != null) ? mService.getRunningSessionCount() : 0;
+        int total = (mService != null) ? mService.getSessions().size() : 0;
         if (mDashResumeGuiBtn != null) {
             mDashResumeGuiBtn.setVisibility(hasDesktop ? View.VISIBLE : View.GONE);
         }
-        if (count > 0 || hasDesktop) {
+        if (total > 0 || hasDesktop) {
             mDashResumeContainer.setVisibility(View.VISIBLE);
-            mDashResumeBtn.setVisibility(count > 0 ? View.VISIBLE : View.GONE);
-            mDashResumeBtn.setText("↩ Volver a la terminal activa (" + count + ")");
+            mDashResumeBtn.setVisibility(total > 0 ? View.VISIBLE : View.GONE);
+            if (running > 0) {
+                mDashResumeBtn.setText("↩ Volver a la terminal activa (" + running + ")");
+            } else {
+                mDashResumeBtn.setText("↩ Ver terminal finalizada (" + total + ")");
+            }
         } else {
             mDashResumeContainer.setVisibility(View.GONE);
         }
@@ -1458,6 +1532,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
             }
         }
         refreshDrawerSessions();
+        updatePathButtonsForMode();
     }
 
     private void promptRenameSession(final TerminalSession session) {
@@ -1665,7 +1740,11 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         boolean guiMode = TerminalSettings.UI_MODE_GUI.equals(mSettings.getLaunchUiMode());
 
         if (r.rootStatus.rootfsExists && r.hasRoot) {
-            mRootPrimaryBtn.setText(guiMode ? "🖥 Iniciar Escritorio (Root)" : "▶ Entrar a Debian 12 (Root)");
+            boolean hasActiveRoot = !guiMode && mService != null
+                && mService.findRunningSession(DebianTermService.SessionKind.DEBIAN_ROOT) != null;
+            mRootPrimaryBtn.setText(guiMode
+                ? "🖥 Iniciar Escritorio (Root)"
+                : (hasActiveRoot ? "↩ Volver a Debian 12 (Root)" : "▶ Entrar a Debian 12 (Root)"));
             mRootPrimaryBtn.setBackground(makePillBg("#D70A53"));
             mRootPrimaryBtn.setEnabled(true);
             mRootSecondaryBtn.setText("Gestionar");
@@ -1682,7 +1761,11 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         }
 
         if (r.prootStatus.rootfsExists) {
-            mProotPrimaryBtn.setText(guiMode ? "🖥 Iniciar Escritorio (Sin Root)" : "▶ Entrar a Debian 12 (Sin Root)");
+            boolean hasActiveProot = !guiMode && mService != null
+                && mService.findRunningSession(DebianTermService.SessionKind.DEBIAN_PROOT) != null;
+            mProotPrimaryBtn.setText(guiMode
+                ? "🖥 Iniciar Escritorio (Sin Root)"
+                : (hasActiveProot ? "↩ Volver a Debian 12 (Sin Root)" : "▶ Entrar a Debian 12 (Sin Root)"));
             mProotPrimaryBtn.setBackground(makePillBg("#238636"));
             mProotPrimaryBtn.setEnabled(r.prootBinariesReady);
             mProotSecondaryBtn.setVisibility(View.VISIBLE);
@@ -1871,7 +1954,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
             if (TerminalSettings.UI_MODE_GUI.equals(mSettings.getLaunchUiMode())) {
                 launchGraphicalDebian(true);
             } else {
-                openNewRootDebianSession();
+                enterOrResumeRootDebianSession();
             }
             return;
         }
@@ -1893,7 +1976,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
             if (TerminalSettings.UI_MODE_GUI.equals(mSettings.getLaunchUiMode())) {
                 launchGraphicalDebian(false);
             } else {
-                openNewProotDebianSession();
+                enterOrResumeProotDebianSession();
             }
             return;
         }
@@ -2798,9 +2881,18 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
     @Override
     public void onSessionFinished(TerminalSession finishedSession) {
         if (finishedSession == mActiveDesktopSession) {
+            disconnectRfbClient();
             mActiveDesktopSession = null;
         }
+        if (mService != null && mService.hasSession(finishedSession)) {
+            if (finishedSession.getExitStatus() == 0) {
+                closeSession(finishedSession);
+                return;
+            }
+            mService.onSessionStateChanged();
+        }
         refreshDrawerSessions();
+        updatePathButtonsForMode();
     }
 
     @Override

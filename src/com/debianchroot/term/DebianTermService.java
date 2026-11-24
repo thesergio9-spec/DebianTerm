@@ -15,9 +15,13 @@ import com.termux.terminal.TerminalSession;
 import com.termux.terminal.TerminalSessionClient;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Foreground service hosting terminal sessions across Activity lifecycle changes.
@@ -33,6 +37,16 @@ public final class DebianTermService extends Service {
     private static final int DEFAULT_TRANSCRIPT_ROWS = 4000;
     private static final long GRACEFUL_EXIT_TIMEOUT_MS = 1500L;
 
+    public enum SessionKind {
+        DEBIAN_ROOT,
+        DEBIAN_PROOT,
+        ANDROID_ROOT,
+        ANDROID_SHELL,
+        DESKTOP_VNC,
+        DESKTOP_X11,
+        COMMAND
+    }
+
     public final class LocalBinder extends Binder {
         public DebianTermService getService() {
             return DebianTermService.this;
@@ -46,17 +60,50 @@ public final class DebianTermService extends Service {
     private final IBinder mBinder = new LocalBinder();
     private final List<TerminalSession> mSessions = new ArrayList<>();
     private final Map<TerminalSession, String> mSessionNames = new HashMap<>();
+    private final Map<TerminalSession, SessionKind> mSessionKinds = new HashMap<>();
     private PowerManager.WakeLock mWakeLock;
     private boolean mClientVisible = false;
-    private int mSessionCounter = 0;
+    private boolean mIsForeground = false;
     private ServiceEventListener mEventListener;
     private final android.os.Handler mMainHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+
+    /**
+     * Returns the lowest positive session index (1, 2, 3...) not currently used
+     * by an active session name sharing {@code prefix}.
+     */
+    public static int nextAvailableSessionNumber(Collection<String> existingNames, String prefix) {
+        if (existingNames == null || existingNames.isEmpty() || prefix == null) {
+            return 1;
+        }
+        Set<Integer> used = new HashSet<>();
+        for (String name : existingNames) {
+            if (name == null || !name.startsWith(prefix)) continue;
+            String suffix = name.substring(prefix.length()).trim();
+            if (suffix.isEmpty()) continue;
+            try {
+                int n = Integer.parseInt(suffix);
+                if (n >= 1) {
+                    used.add(n);
+                }
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        int candidate = 1;
+        while (used.contains(candidate)) {
+            candidate++;
+        }
+        return candidate;
+    }
+
+    private String allocateSessionName(String prefix) {
+        pruneCleanlyFinishedSessions();
+        return prefix + nextAvailableSessionNumber(mSessionNames.values(), prefix);
+    }
 
     @Override
     public void onCreate() {
         super.onCreate();
         ensureNotificationChannel();
-        startForeground(NOTIFICATION_ID, buildNotification());
     }
 
     @Override
@@ -70,7 +117,16 @@ public final class DebianTermService extends Service {
                 toggleWakeLock();
             }
         }
-        updateNotification();
+        if (mSessions.isEmpty()) {
+            if (!mIsForeground) {
+                startForeground(NOTIFICATION_ID, buildNotification());
+                mIsForeground = true;
+            }
+            stopForegroundAndSelfIfEmpty();
+        } else {
+            startForeground(NOTIFICATION_ID, buildNotification());
+            mIsForeground = true;
+        }
         return START_NOT_STICKY;
     }
 
@@ -87,6 +143,8 @@ public final class DebianTermService extends Service {
         }
         mSessions.clear();
         mSessionNames.clear();
+        mSessionKinds.clear();
+        mIsForeground = false;
         super.onDestroy();
     }
 
@@ -96,14 +154,81 @@ public final class DebianTermService extends Service {
 
     public void setClientVisible(boolean visible) {
         mClientVisible = visible;
-        if (!visible && mSessions.isEmpty()) {
-            stopForeground(true);
-            stopSelf();
+        if (!visible) {
+            pruneCleanlyFinishedSessions();
+            if (mSessions.isEmpty()) {
+                stopForegroundAndSelfIfEmpty();
+            }
         }
     }
 
     public List<TerminalSession> getSessions() {
         return mSessions;
+    }
+
+    public boolean hasSession(TerminalSession session) {
+        return session != null && mSessions.contains(session);
+    }
+
+    public int getRunningSessionCount() {
+        int count = 0;
+        for (TerminalSession s : mSessions) {
+            if (s.isRunning()) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    public TerminalSession findRunningSession(SessionKind kind) {
+        if (kind == null) return null;
+        for (int i = mSessions.size() - 1; i >= 0; i--) {
+            TerminalSession s = mSessions.get(i);
+            if (kind == mSessionKinds.get(s) && s.isRunning()) {
+                return s;
+            }
+        }
+        return null;
+    }
+
+    public int pruneCleanlyFinishedSessions() {
+        int removed = 0;
+        Iterator<TerminalSession> it = mSessions.iterator();
+        while (it.hasNext()) {
+            TerminalSession s = it.next();
+            if (!s.isRunning() && s.getExitStatus() == 0) {
+                it.remove();
+                mSessionNames.remove(s);
+                mSessionKinds.remove(s);
+                removed++;
+            }
+        }
+        if (removed > 0) {
+            refreshForegroundState();
+        }
+        return removed;
+    }
+
+    public int pruneFinishedSessions(SessionKind kind) {
+        int removed = 0;
+        Iterator<TerminalSession> it = mSessions.iterator();
+        while (it.hasNext()) {
+            TerminalSession s = it.next();
+            if (!s.isRunning() && (kind == null || kind == mSessionKinds.get(s))) {
+                it.remove();
+                mSessionNames.remove(s);
+                mSessionKinds.remove(s);
+                removed++;
+            }
+        }
+        if (removed > 0) {
+            refreshForegroundState();
+        }
+        return removed;
+    }
+
+    public void onSessionStateChanged() {
+        refreshForegroundState();
     }
 
     public String getSessionDisplayName(TerminalSession session) {
@@ -124,7 +249,6 @@ public final class DebianTermService extends Service {
     }
 
     public TerminalSession createDebianSession(String chrootPath, String scriptPath, TerminalSessionClient client) {
-        ensureForegroundStarted();
         String suBin = ChrootManager.resolveWorkingSuPath();
         String qScript = ChrootManager.shellQuote(scriptPath);
         String qChroot = ChrootManager.shellQuote(chrootPath);
@@ -142,17 +266,16 @@ public final class DebianTermService extends Service {
             "fi";
 
         String shCmd = "exec " + ChrootManager.shellQuote(suBin) + " -c " + ChrootManager.shellQuote(rootCmd);
-        return createRawSession("/system/bin/sh", shCmd, "Debian 12 (Root) #" + (++mSessionCounter), client);
+        return createRawSession("/system/bin/sh", shCmd, allocateSessionName("Debian 12 (Root) #"), SessionKind.DEBIAN_ROOT, client);
     }
 
     public TerminalSession createProotDebianSession(TerminalSessionClient client) {
-        ensureForegroundStarted();
         java.io.File script = ProotManager.getLauncherScript(this);
         java.io.File rootfs = ProotManager.getRootfsDir(this);
         if (!rootfs.isDirectory() || !new java.io.File(rootfs, "bin/bash").exists()) {
             String msgCmd = "echo 'Debian 12 (Sin Root) no está instalado en " + rootfs.getAbsolutePath()
                 + ". Vuelve al panel de inicio para instalarlo.'; exec /system/bin/sh";
-            return createRawSession("/system/bin/sh", msgCmd, "Debian 12 (Sin Root) #" + (++mSessionCounter), client);
+            return createRawSession("/system/bin/sh", msgCmd, allocateSessionName("Debian 12 (Sin Root) #"), SessionKind.DEBIAN_PROOT, client);
         }
         try {
             if (!script.exists() || !script.canExecute()) {
@@ -162,10 +285,10 @@ public final class DebianTermService extends Service {
         } catch (java.io.IOException e) {
             String errCmd = "echo " + ChrootManager.shellQuote("Error preparando script PRoot: " + e.getMessage())
                 + "; exec /system/bin/sh";
-            return createRawSession("/system/bin/sh", errCmd, "Debian 12 (Sin Root) #" + (++mSessionCounter), client);
+            return createRawSession("/system/bin/sh", errCmd, allocateSessionName("Debian 12 (Sin Root) #"), SessionKind.DEBIAN_PROOT, client);
         }
         String shCmd = "exec " + ChrootManager.shellQuote(script.getAbsolutePath());
-        return createRawSession("/system/bin/sh", shCmd, "Debian 12 (Sin Root) #" + (++mSessionCounter), client);
+        return createRawSession("/system/bin/sh", shCmd, allocateSessionName("Debian 12 (Sin Root) #"), SessionKind.DEBIAN_PROOT, client);
     }
 
     public TerminalSession createDebianCommandSession(
@@ -176,8 +299,20 @@ public final class DebianTermService extends Service {
         String label,
         TerminalSessionClient client
     ) {
-        ensureForegroundStarted();
-        String name = (label != null && !label.isEmpty()) ? label : ("Debian GUI #" + (++mSessionCounter));
+        return createDebianCommandSession(
+            isRootMode, chrootPath, scriptPath, innerDebianCmd, label, SessionKind.COMMAND, client);
+    }
+
+    private TerminalSession createDebianCommandSession(
+        boolean isRootMode,
+        String chrootPath,
+        String scriptPath,
+        String innerDebianCmd,
+        String label,
+        SessionKind kind,
+        TerminalSessionClient client
+    ) {
+        String name = (label != null && !label.isEmpty()) ? label : allocateSessionName("Debian GUI #");
         if (isRootMode) {
             String suBin = ChrootManager.resolveWorkingSuPath();
             String qScript = ChrootManager.shellQuote(scriptPath);
@@ -194,7 +329,7 @@ public final class DebianTermService extends Service {
                 "  echo 'Chroot Debian no encontrado en " + chrootPath + "'; " +
                 "fi";
             String shCmd = "exec " + ChrootManager.shellQuote(suBin) + " -c " + ChrootManager.shellQuote(rootCmd);
-            return createRawSession("/system/bin/sh", shCmd, name, client);
+            return createRawSession("/system/bin/sh", shCmd, name, kind, client);
         } else {
             java.io.File script = ProotManager.getLauncherScript(this);
             try {
@@ -204,11 +339,11 @@ public final class DebianTermService extends Service {
             } catch (java.io.IOException e) {
                 String errCmd = "echo " + ChrootManager.shellQuote("Error preparando script PRoot: " + e.getMessage())
                     + "; exec /system/bin/sh";
-                return createRawSession("/system/bin/sh", errCmd, name, client);
+                return createRawSession("/system/bin/sh", errCmd, name, kind, client);
             }
             String shCmd = "exec " + ChrootManager.shellQuote(script.getAbsolutePath()) + " -c "
                 + ChrootManager.shellQuote(innerDebianCmd);
-            return createRawSession("/system/bin/sh", shCmd, name, client);
+            return createRawSession("/system/bin/sh", shCmd, name, kind, client);
         }
     }
 
@@ -224,7 +359,8 @@ public final class DebianTermService extends Service {
         String vncCmd = DesktopManager.generateVncStartCommand(desktopId, width, height);
         String label = (DesktopManager.DESKTOP_LXDE.equals(desktopId) ? "LXDE VNC" : "XFCE4 VNC")
             + (isRootMode ? " (Root)" : " (PRoot)");
-        return createDebianCommandSession(isRootMode, chrootPath, scriptPath, vncCmd, label, client);
+        return createDebianCommandSession(
+            isRootMode, chrootPath, scriptPath, vncCmd, label, SessionKind.DESKTOP_VNC, client);
     }
 
     public TerminalSession createDesktopX11Session(
@@ -235,7 +371,6 @@ public final class DebianTermService extends Service {
         DesktopManager.DesktopStatus deskStatus,
         TerminalSessionClient client
     ) {
-        ensureForegroundStarted();
         String sharedTmp = isRootMode
             ? (chrootPath + "/tmp")
             : new java.io.File(ProotManager.getRootfsDir(this), "tmp").getAbsolutePath();
@@ -259,7 +394,7 @@ public final class DebianTermService extends Service {
                 "  chroot " + qChroot + " /bin/bash -lc " + qClient + "\n" +
                 "fi\n";
             String shCmd = "exec " + ChrootManager.shellQuote(suBin) + " -c " + ChrootManager.shellQuote(rootCmd);
-            return createRawSession("/system/bin/sh", shCmd, label, client);
+            return createRawSession("/system/bin/sh", shCmd, label, SessionKind.DESKTOP_X11, client);
         } else {
             java.io.File script = ProotManager.getLauncherScript(this);
             try {
@@ -268,11 +403,11 @@ public final class DebianTermService extends Service {
             } catch (java.io.IOException e) {
                 String errCmd = "echo " + ChrootManager.shellQuote("Error preparando script PRoot: " + e.getMessage())
                     + "; exec /system/bin/sh";
-                return createRawSession("/system/bin/sh", errCmd, label, client);
+                return createRawSession("/system/bin/sh", errCmd, label, SessionKind.DESKTOP_X11, client);
             }
             String shCmd = x11ServerCmd + "\n" + ChrootManager.shellQuote(script.getAbsolutePath())
                 + " -c " + ChrootManager.shellQuote(x11ClientCmd) + "\n";
-            return createRawSession("/system/bin/sh", shCmd, label, client);
+            return createRawSession("/system/bin/sh", shCmd, label, SessionKind.DESKTOP_X11, client);
         }
     }
 
@@ -291,18 +426,16 @@ public final class DebianTermService extends Service {
     }
 
     public TerminalSession createAndroidRootSession(TerminalSessionClient client) {
-        ensureForegroundStarted();
         String suBin = ChrootManager.resolveWorkingSuPath();
         String shCmd = "exec " + ChrootManager.shellQuote(suBin);
-        return createRawSession("/system/bin/sh", shCmd, "Android root #" + (++mSessionCounter), client);
+        return createRawSession("/system/bin/sh", shCmd, allocateSessionName("Android root #"), SessionKind.ANDROID_ROOT, client);
     }
 
     public TerminalSession createAndroidShellSession(TerminalSessionClient client) {
-        ensureForegroundStarted();
-        return createRawSession("/system/bin/sh", "exec /system/bin/sh", "Android sh #" + (++mSessionCounter), client);
+        return createRawSession("/system/bin/sh", "exec /system/bin/sh", allocateSessionName("Android sh #"), SessionKind.ANDROID_SHELL, client);
     }
 
-    private TerminalSession createRawSession(String shellPath, String shCommand, String defaultName, TerminalSessionClient client) {
+    private TerminalSession createRawSession(String shellPath, String shCommand, String defaultName, SessionKind kind, TerminalSessionClient client) {
         String cwd = getFilesDir().getAbsolutePath();
         String[] args = { shellPath, "-c", shCommand };
         String[] env = {
@@ -317,7 +450,8 @@ public final class DebianTermService extends Service {
         session.mSessionName = defaultName;
         mSessions.add(session);
         mSessionNames.put(session, defaultName);
-        updateNotification();
+        mSessionKinds.put(session, kind);
+        ensureForegroundStarted();
         return session;
     }
 
@@ -326,18 +460,15 @@ public final class DebianTermService extends Service {
         session.finishGracefully(GRACEFUL_EXIT_TIMEOUT_MS);
         mSessions.remove(session);
         mSessionNames.remove(session);
-        updateNotification();
-        if (mSessions.isEmpty() && !mClientVisible) {
-            releaseWakeLock();
-            stopForeground(true);
-            stopSelf();
-        }
+        mSessionKinds.remove(session);
+        refreshForegroundState();
     }
 
     public void stopAllSessionsAndSelf() {
         final List<TerminalSession> toClose = new ArrayList<>(mSessions);
         mSessions.clear();
         mSessionNames.clear();
+        mSessionKinds.clear();
         releaseWakeLock();
 
         for (TerminalSession s : toClose) {
@@ -345,7 +476,10 @@ public final class DebianTermService extends Service {
         }
 
         if (toClose.isEmpty()) {
-            stopForeground(true);
+            if (mIsForeground) {
+                stopForeground(true);
+                mIsForeground = false;
+            }
             stopSelf();
             if (mEventListener != null) {
                 mEventListener.onServiceStopAllRequested();
@@ -374,7 +508,10 @@ public final class DebianTermService extends Service {
                 }
             }
             mMainHandler.post(() -> {
-                stopForeground(true);
+                if (mIsForeground) {
+                    stopForeground(true);
+                    mIsForeground = false;
+                }
                 stopSelf();
                 if (mEventListener != null) {
                     mEventListener.onServiceStopAllRequested();
@@ -424,6 +561,26 @@ public final class DebianTermService extends Service {
         } else {
             startService(self);
         }
+        startForeground(NOTIFICATION_ID, buildNotification());
+        mIsForeground = true;
+    }
+
+    private void stopForegroundAndSelfIfEmpty() {
+        if (!mSessions.isEmpty()) return;
+        releaseWakeLock();
+        if (mIsForeground) {
+            stopForeground(true);
+            mIsForeground = false;
+        }
+        stopSelf();
+    }
+
+    private void refreshForegroundState() {
+        if (mSessions.isEmpty()) {
+            stopForegroundAndSelfIfEmpty();
+        } else if (mIsForeground) {
+            updateNotification();
+        }
     }
 
     private void ensureNotificationChannel() {
@@ -443,6 +600,9 @@ public final class DebianTermService extends Service {
     }
 
     private void updateNotification() {
+        if (!mIsForeground || mSessions.isEmpty()) {
+            return;
+        }
         NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
         if (nm != null) {
             nm.notify(NOTIFICATION_ID, buildNotification());
@@ -464,10 +624,16 @@ public final class DebianTermService extends Service {
         wakeIntent.setAction(ACTION_TOGGLE_WAKELOCK);
         PendingIntent wakePi = PendingIntent.getService(this, 2, wakeIntent, flags);
 
-        int count = mSessions.size();
-        String text = count == 1
-            ? "1 sesión activa"
-            : count + " sesiones activas";
+        int running = getRunningSessionCount();
+        int total = mSessions.size();
+        String text;
+        if (running > 0) {
+            text = running == 1 ? "1 sesión activa" : running + " sesiones activas";
+        } else if (total > 0) {
+            text = total == 1 ? "1 sesión finalizada" : total + " sesiones finalizadas";
+        } else {
+            text = "Sin sesiones activas";
+        }
         if (isWakeLockHeld()) {
             text += " • Wake Lock ON";
         }

@@ -30,6 +30,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.Properties;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -50,6 +52,7 @@ import java.util.zip.Deflater;
  * 9) Graceful session shutdown API (SIGHUP/SIGTERM -> SIGKILL fallback)
  * 10) Graphical DesktopManager scripts (XFCE4/LXDE VNC, Termux:X11)
  * 11) Pure-Java RFB 3.8 client protocol (Raw + Zlib + CopyRect + CutText + input)
+ * 12) Session numbering reuse & lifecycle API (lowest available #N, SessionKind, pruning)
  */
 public final class VerifyAll {
 
@@ -116,7 +119,8 @@ public final class VerifyAll {
         testGracefulCloseApi();
         testDesktopManagerScripts();
         testRfbClientProtocol();
-        System.out.println("ALL 11 VERIFICATION TESTS PASSED.");
+        testSessionNumberingAndLifecycleApi();
+        System.out.println("ALL 12 VERIFICATION TESTS PASSED.");
     }
 
     private static void testDecset2026() {
@@ -668,6 +672,55 @@ public final class VerifyAll {
             ss.close();
         }
         System.out.println("[PASS] Test 11: RFB 3.8 client (Raw + Zlib + CopyRect + ServerCutText + Pointer/Key)");
+    }
+
+    private static void testSessionNumberingAndLifecycleApi() throws Exception {
+        String rootPrefix = "Debian 12 (Root) #";
+        String prootPrefix = "Debian 12 (Sin Root) #";
+
+        check(DebianTermService.nextAvailableSessionNumber(Collections.emptyList(), rootPrefix) == 1,
+            "Empty session list must start at #1");
+        check(DebianTermService.nextAvailableSessionNumber(null, rootPrefix) == 1,
+            "Null session list must start at #1");
+        check(DebianTermService.nextAvailableSessionNumber(Collections.singletonList("Debian 12 (Root) #1"), rootPrefix) == 2,
+            "When #1 is active, next must be #2");
+        check(DebianTermService.nextAvailableSessionNumber(Collections.singletonList("Debian 12 (Root) #2"), rootPrefix) == 1,
+            "When #1 was closed and only #2 remains, next must reuse #1");
+        check(DebianTermService.nextAvailableSessionNumber(
+            Arrays.asList("Debian 12 (Root) #1", "Debian 12 (Root) #3"), rootPrefix) == 2,
+            "When #1 and #3 are active, next must fill gap #2");
+        check(DebianTermService.nextAvailableSessionNumber(
+            Arrays.asList("Debian 12 (Root) #1", "Debian 12 (Root) #2"), prootPrefix) == 1,
+            "Separate prefixes must start at #1 independently");
+        check(DebianTermService.nextAvailableSessionNumber(
+            Arrays.asList(
+                "Mi servidor",
+                "Debian 12 (Root) #abc",
+                "Debian 12 (Root) #0",
+                "Debian 12 (Root) #-3",
+                "Debian 12 (Root) #1"
+            ), rootPrefix) == 2,
+            "Renamed/non-numeric/non-positive suffixes must be ignored safely");
+
+        Class<?> kindCls = Class.forName("com.debianchroot.term.DebianTermService$SessionKind");
+        Object[] kinds = kindCls.getEnumConstants();
+        check(kinds != null && kinds.length == 7,
+            "SessionKind must have 7 constants, got " + (kinds == null ? 0 : kinds.length));
+
+        check(Modifier.isPublic(DebianTermService.class.getMethod("getRunningSessionCount").getModifiers()),
+            "getRunningSessionCount must be public");
+        check(Modifier.isPublic(DebianTermService.class.getMethod("findRunningSession", kindCls).getModifiers()),
+            "findRunningSession(SessionKind) must be public");
+        check(Modifier.isPublic(DebianTermService.class.getMethod("pruneCleanlyFinishedSessions").getModifiers()),
+            "pruneCleanlyFinishedSessions must be public");
+        check(Modifier.isPublic(DebianTermService.class.getMethod("pruneFinishedSessions", kindCls).getModifiers()),
+            "pruneFinishedSessions(SessionKind) must be public");
+        check(Modifier.isPublic(DebianTermService.class.getMethod("hasSession", TerminalSession.class).getModifiers()),
+            "hasSession(TerminalSession) must be public");
+        check(Modifier.isPublic(DebianTermService.class.getMethod("onSessionStateChanged").getModifiers()),
+            "onSessionStateChanged must be public");
+
+        System.out.println("[PASS] Test 12: Session numbering reuse (#1), SessionKind & lifecycle pruning API");
     }
 
     private static String fetchText(String urlStr) throws Exception {

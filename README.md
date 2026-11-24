@@ -1,6 +1,6 @@
 # DebianTerm
 
-**DebianTerm** (v2.1.0) es un **instalador completo de Debian 12 (Bookworm)** y emulador de terminal + escritorio gráfico para Android basado en el motor y teclado de Termux (`terminal-emulator` y `terminal-view`), con **verificación de requerimientos mínimos al iniciar**, selector **Terminal (CLI) vs Modo Gráfico Híbrido** y **dos caminos de ejecución totalmente funcionales**:
+**DebianTerm** (v2.1.1) es un **instalador completo de Debian 12 (Bookworm)** y emulador de terminal + escritorio gráfico para Android basado en el motor y teclado de Termux (`terminal-emulator` y `terminal-view`), con **verificación de requerimientos mínimos al iniciar**, selector **Terminal (CLI) vs Modo Gráfico Híbrido** y **dos caminos de ejecución totalmente funcionales**:
 
 1. **Camino 1 — Con Root (Chroot Nativo)**: máximo rendimiento del kernel Linux y montajes reales para dispositivos con Magisk, KernelSU o APatch.
 2. **Camino 2 — Sin Root (PRoot Integrado)**: motor `PRoot` empaquetado directamente en el APK (`arm64-v8a` y `armeabi-v7a`), **100% independiente de Termux**, para dispositivos sin acceso root.
@@ -12,11 +12,11 @@ Coexiste de forma independiente junto a Termux (`com.termux`) usando su propio p
 ## 📥 Descarga Rápida
 
 Descarga el APK compilado desde la última Release:
-- **[DebianTerm.apk (v2.1.0)](https://github.com/thesergio9-spec/DebianTerm/releases/download/v2.1.0/DebianTerm.apk)**
+- **[DebianTerm.apk (v2.1.1)](https://github.com/thesergio9-spec/DebianTerm/releases/download/v2.1.1/DebianTerm.apk)**
 
 ---
 
-## 🚀 Características Principales (v2.1.0)
+## 🚀 Características Principales (v2.1.1)
 
 ### 1. Panel de Inicio y Verificación de Requerimientos Mínimos
 Al abrir la app se ejecuta automáticamente un diagnóstico (`SystemRequirements`) antes de instalar o iniciar Debian 12:
@@ -51,6 +51,7 @@ En la tarjeta **Modo de Inicio**, antes de abrir Debian 12 en cualquiera de los 
 - Genera un script de entrada seguro (`/data/local/bin/debian`) con aislamiento `env -i`, timeouts en montajes (`timeout 5 mount`), contador de sesiones en `/dev/chroot_sessions` con **desmontaje automático seguro al cerrar la última sesión** y subcomandos `status`, `stop`/`umount`, `exec`.
 - Ejecución directa en contexto `su` para evitar denegaciones SELinux en Android 10–15.
 - Cierre suave de sesiones (`finishGracefully`) enviando `SIGHUP`/`SIGTERM` antes del fallback `SIGKILL` al cerrar pestañas con `✕` o pulsar `Salir` en la notificación.
+- Ciclo de vida limpio de sesiones: cierre automático tras `exit` limpio (código `0`), numeración reutilizable desde el menor índice libre (`#1` al iniciar o tras cerrar todas) y reutilización inteligente desde el panel de inicio para no duplicar sesiones activas.
 
 #### Camino 2: Sin Root (PRoot Integrado en el APK)
 - Incluye `libproot.so`, `libproot_loader.so` y `libproot_loader32.so` (`arm64-v8a` y `armeabi-v7a`) compilados con `targetSdkVersion=28` para permitir ejecución y mapeo binario en almacenamiento interno (`untrusted_app_27`) en Android 10–15.
@@ -90,7 +91,7 @@ DebianTerm/
 ├── libs/                        # Bibliotecas JAR (annotation-1.5.0, xz-1.9)
 ├── jniLibs/                     # Binarios nativos arm64-v8a y armeabi-v7a:
 │   │                            # libtermux.so, libproot.so, libproot_loader.so, libproot_loader32.so
-├── tests/                       # Suite de 11 pruebas unitarias en JVM (VerifyAll.java)
+├── tests/                       # Suite de 12 pruebas unitarias en JVM (VerifyAll.java)
 ├── setup-deps.sh                # Descarga código base Termux, JARs, libtermux.so y binarios PRoot
 └── build.sh                     # Compilación completa (aapt2, javac, d8, zipalign, apksigner)
 ```
@@ -117,7 +118,7 @@ El APK resultante se generará en `build/DebianTerm-release.apk`.
 
 ## 🧪 Pruebas Unitarias
 
-La suite [VerifyAll.java](tests/VerifyAll.java) valida en JVM las **11 pruebas clave**:
+La suite [VerifyAll.java](tests/VerifyAll.java) valida en JVM las **12 pruebas clave**:
 1. Salida sincronizada `DECSET 2026` + consultas `DECRQM`.
 2. Modo Pan del teclado sin pérdida de scrollback ni redimensionamiento PTY (`SIGWINCH`).
 3. Parser en vivo del índice LXC (`bookworm` / `trixie`) y verificación `SHA256SUMS`.
@@ -129,6 +130,7 @@ La suite [VerifyAll.java](tests/VerifyAll.java) valida en JVM las **11 pruebas c
 9. API de cierre suave de sesiones (`TerminalSession.finishGracefully` con `SIGHUP`/`SIGTERM` y fallback `SIGKILL`).
 10. Generación y validación `sh -n` de scripts gráficos (`DesktopManager`: XFCE4, LXDE, `Xtigervnc`, `Termux:X11` y URL oficial APK).
 11. Protocolo cliente RFB 3.8 (`RfbClient`) contra servidor VNC simulado (Raw + Zlib + CopyRect + `ServerCutText` + eventos de puntero/teclado).
+12. Numeración reutilizable de sesiones (`#1` desde el menor índice libre), `SessionKind` y limpieza de sesiones finalizadas (`DebianTermService`).
 
 ```bash
 javac -encoding UTF-8 -cp build/classes:/opt/android-sdk/android.jar:libs/xz-1.9.jar -d build/test-classes tests/VerifyAll.java
