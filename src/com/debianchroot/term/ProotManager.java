@@ -1,6 +1,10 @@
 package com.debianchroot.term;
 
+import android.Manifest;
 import android.content.Context;
+import android.content.pm.PackageManager;
+import android.os.Build;
+import android.os.Environment;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -206,8 +210,8 @@ public final class ProotManager {
 
     public static void configureRootfs(File rootfsDir) throws IOException {
         String[] dirs = {
-            "tmp", "dev", "dev/shm", "proc", "sys", "sdcard", "root",
-            ".l2s", "etc/apt/apt.conf.d", "etc/profile.d", "usr/sbin", "etc/debianterm-proc"
+            "tmp", "dev", "dev/shm", "proc", "sys", "sdcard", "storage/emulated/0", "root",
+            ".l2s", "etc/apt/apt.conf.d", "etc/profile.d", "usr/sbin", "usr/local/bin", "etc/debianterm-proc"
         };
         for (String rel : dirs) {
             File d = new File(rootfsDir, rel);
@@ -294,6 +298,82 @@ public final class ProotManager {
         writeUtf8File(new File(fakeProc, "vmstat"),
             "nr_free_pages 100000\npgpgin 1000\npgpgout 1000\npswpin 0\npswpout 0\n", 0444);
         writeUtf8File(new File(fakeProc, "cap_last_cap"), "40\n", 0444);
+
+        setupStorageLinks(rootfsDir);
+    }
+
+    public static boolean hasSharedStorageAccess(Context context) {
+        if (context == null) return false;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            return Environment.isExternalStorageManager();
+        }
+        return context.checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+            && context.checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED;
+    }
+
+    public static String generateSetupStorageScript() {
+        return "#!/bin/sh\n" +
+            "# Configura accesos directos ~/storage hacia /sdcard en DebianTerm (Sin Root PRoot)\n" +
+            "if [ -d /sdcard ] && [ -r /sdcard ] && ls /sdcard >/dev/null 2>&1; then\n" +
+            "    mkdir -p /root/storage\n" +
+            "    ln -sfn /sdcard /root/storage/shared\n" +
+            "    ln -sfn /sdcard/Download /root/storage/downloads\n" +
+            "    ln -sfn /sdcard/DCIM /root/storage/dcim\n" +
+            "    ln -sfn /sdcard/Documents /root/storage/documents\n" +
+            "    ln -sfn /sdcard/Pictures /root/storage/pictures\n" +
+            "    ln -sfn /sdcard/Music /root/storage/music\n" +
+            "    ln -sfn /sdcard/Movies /root/storage/movies\n" +
+            "    if [ -d /external_sd ] && [ -r /external_sd ]; then\n" +
+            "        ln -sfn /external_sd /root/storage/external-1\n" +
+            "    fi\n" +
+            "    echo \"✓ Almacenamiento configurado: /sdcard y ~/storage/{shared,downloads,dcim,documents,pictures,music,movies}\"\n" +
+            "    exit 0\n" +
+            "fi\n" +
+            "echo \"✕ No hay acceso a /storage/emulated/0 en este entorno Sin Root.\" >&2\n" +
+            "echo \"  Abre el menú lateral (☰) o Panel de Inicio y pulsa 'Configurar almacenamiento (setup-storage)',\" >&2\n" +
+            "echo \"  concede el permiso en Android y vuelve a abrir esta sesión.\" >&2\n" +
+            "exit 1\n";
+    }
+
+    public static void setupStorageLinks(File rootfsDir) throws IOException {
+        if (rootfsDir == null || !rootfsDir.isDirectory()) return;
+        String[] ensureDirs = { "sdcard", "storage/emulated/0", "root/storage", "usr/local/bin" };
+        for (String rel : ensureDirs) {
+            File d = new File(rootfsDir, rel);
+            if (!d.exists() && !d.mkdirs()) {
+                throw new IOException("No se pudo crear directorio de almacenamiento: " + d);
+            }
+        }
+
+        File storageHome = new File(rootfsDir, "root/storage");
+        String[][] links = {
+            { "shared", "/sdcard" },
+            { "downloads", "/sdcard/Download" },
+            { "dcim", "/sdcard/DCIM" },
+            { "documents", "/sdcard/Documents" },
+            { "pictures", "/sdcard/Pictures" },
+            { "music", "/sdcard/Music" },
+            { "movies", "/sdcard/Movies" }
+        };
+        for (String[] pair : links) {
+            File linkFile = new File(storageHome, pair[0]);
+            if (TarExtractor.isSymlink(linkFile) || !linkFile.exists() || linkFile.isFile()) {
+                TarExtractor.deleteRecursivelyNoFollow(linkFile);
+                TarExtractor.createSymlink(pair[1], linkFile);
+            }
+        }
+
+        File helperScript = new File(rootfsDir, "usr/local/bin/debianterm-setup-storage");
+        if (TarExtractor.isSymlink(helperScript)) {
+            TarExtractor.deleteRecursivelyNoFollow(helperScript);
+        }
+        writeUtf8File(helperScript, generateSetupStorageScript(), 0755);
+
+        File aliasLink = new File(rootfsDir, "usr/local/bin/setup-storage");
+        if (TarExtractor.isSymlink(aliasLink) || !aliasLink.exists() || aliasLink.isFile()) {
+            TarExtractor.deleteRecursivelyNoFollow(aliasLink);
+            TarExtractor.createSymlink("debianterm-setup-storage", aliasLink);
+        }
     }
 
     public static String generateProotLauncherScript(
@@ -324,7 +404,7 @@ public final class ProotManager {
         if (disableSeccomp) {
             sb.append("export PROOT_NO_SECCOMP=1\n");
         }
-        sb.append("mkdir -p \"$PROOT_TMP_DIR\" \"$PROOT_L2S_DIR\" \"$ROOTFS/tmp\" 2>/dev/null || true\n\n");
+        sb.append("mkdir -p \"$PROOT_TMP_DIR\" \"$PROOT_L2S_DIR\" \"$ROOTFS/tmp\" \"$ROOTFS/sdcard\" \"$ROOTFS/storage/emulated/0\" 2>/dev/null || true\n\n");
 
         sb.append("set -- \"$PROOT_BIN\" \\\n");
         sb.append("  --link2symlink \\\n");
@@ -351,7 +431,15 @@ public final class ProotManager {
 
         sb.append("if [ -d /storage/emulated/0 ] && [ -r /storage/emulated/0 ]; then\n");
         sb.append("    set -- \"$@\" \"--bind=/storage/emulated/0:/sdcard\"\n");
-        sb.append("fi\n\n");
+        sb.append("    set -- \"$@\" \"--bind=/storage/emulated/0:/storage/emulated/0\"\n");
+        sb.append("fi\n");
+        sb.append("for _ext in /storage/????-????; do\n");
+        sb.append("    if [ -d \"$_ext\" ] && [ -r \"$_ext\" ]; then\n");
+        sb.append("        mkdir -p \"$ROOTFS/external_sd\" 2>/dev/null || true\n");
+        sb.append("        set -- \"$@\" \"--bind=$_ext:/external_sd\"\n");
+        sb.append("        break\n");
+        sb.append("    fi\n");
+        sb.append("done\n\n");
 
         sb.append("CMD_ARGS=\"--login\"\n");
         sb.append("if [ \"$1\" = \"-c\" ] && [ -n \"$2\" ]; then\n");

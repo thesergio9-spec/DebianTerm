@@ -71,6 +71,9 @@ public final class SystemRequirements {
         public ChrootManager.ChrootStatus rootStatus = new ChrootManager.ChrootStatus();
         public ProotManager.ProotStatus prootStatus = new ProotManager.ProotStatus();
         public DesktopManager.DesktopStatus desktopStatus = new DesktopManager.DesktopStatus();
+        public boolean ignoringBatteryOptimizations;
+        public boolean notificationsEnabled;
+        public boolean sharedStorageGranted;
 
         public Report(List<CheckItem> items) {
             this.items = Collections.unmodifiableList(new ArrayList<>(items));
@@ -313,6 +316,9 @@ public final class SystemRequirements {
         report.prootStatus = prootSt;
         DesktopManager.DesktopStatus deskSt = DesktopManager.inspectDesktopStatus(
             context, report, settings.getChrootPath());
+        boolean ignoringDoze = DebianTermService.isIgnoringBatteryOptimizations(context);
+        boolean notifOk = DebianTermService.areNotificationsEnabled(context);
+        boolean storageGranted = ProotManager.hasSharedStorageAccess(context);
 
         List<CheckItem> fullItems = new ArrayList<>(report.items);
         if (deskSt.termuxX11Installed) {
@@ -330,6 +336,48 @@ public final class SystemRequirements {
                 "Visor VNC listo (Termux:X11 opcional)",
                 "VNC integrado disponible ya; puedes descargar Termux:X11 APK para 60 FPS",
                 Status.INFO
+            ));
+        }
+        if (ignoringDoze && notifOk) {
+            fullItems.add(new CheckItem(
+                "power",
+                "Segundo plano y Wake Lock",
+                "Sin restricciones • Notif. OK",
+                "Excluida de Doze y notificaciones activas para mantener CPU/Wi-Fi en segundo plano",
+                Status.PASS
+            ));
+        } else {
+            fullItems.add(new CheckItem(
+                "power",
+                "Segundo plano y Wake Lock",
+                (ignoringDoze ? "Sin Doze" : "Optimizada (Doze)") + " • " + (notifOk ? "Notif. OK" : "Notif. bloqueadas"),
+                "Para evitar cortes al apagar la pantalla, desactiva la optimización de batería y activa notificaciones.",
+                Status.WARN
+            ));
+        }
+        if (storageGranted) {
+            fullItems.add(new CheckItem(
+                "shared_storage",
+                "Almacenamiento compartido (/sdcard)",
+                "Concedido (PRoot + Root OK)",
+                "Acceso completo a /sdcard y ~/storage listo para Camino 1 y Camino 2",
+                Status.PASS
+            ));
+        } else if (report.hasRoot) {
+            fullItems.add(new CheckItem(
+                "shared_storage",
+                "Almacenamiento compartido (/sdcard)",
+                "Root OK • Sin permiso PRoot",
+                "Camino 1 (Root) ya monta /sdcard; usa setup-storage si quieres /sdcard en Camino 2 (Sin Root)",
+                Status.INFO
+            ));
+        } else {
+            fullItems.add(new CheckItem(
+                "shared_storage",
+                "Almacenamiento compartido (/sdcard)",
+                "Pendiente (setup-storage)",
+                "Concede acceso a archivos para leer y escribir /sdcard y ~/storage en Camino 2 (Sin Root)",
+                Status.WARN
             ));
         }
         Report fullReport = new Report(fullItems);
@@ -350,6 +398,9 @@ public final class SystemRequirements {
         fullReport.rootStatus = rootSt;
         fullReport.prootStatus = prootSt;
         fullReport.desktopStatus = deskSt;
+        fullReport.ignoringBatteryOptimizations = ignoringDoze;
+        fullReport.notificationsEnabled = notifOk;
+        fullReport.sharedStorageGranted = storageGranted;
         return fullReport;
     }
 

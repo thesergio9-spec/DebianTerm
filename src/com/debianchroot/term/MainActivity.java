@@ -2,12 +2,14 @@ package com.debianchroot.term;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.ActivityNotFoundException;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
+import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
@@ -15,6 +17,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.IBinder;
+import android.provider.Settings;
 import android.text.TextUtils;
 import android.util.Log;
 import android.util.TypedValue;
@@ -73,6 +76,9 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
     private static final int CTX_SHARE_TEXT = 102;
     private static final int CTX_PASTE = 103;
     private static final int CTX_RESET_TERM = 104;
+    private static final String PERM_POST_NOTIFICATIONS = "android.permission.POST_NOTIFICATIONS";
+    private static final int REQ_POST_NOTIFICATIONS = 2001;
+    private static final int REQ_STORAGE_PERMISSION = 2002;
 
     private final ExecutorService mBgExecutor = Executors.newSingleThreadExecutor();
 
@@ -93,6 +99,8 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
     private LinearLayout mDrawerSessionsContainer;
     private Button mDrawerAndroidShellBtn;
     private Button mDrawerDesktopBtn;
+    private Button mDrawerWakeLockBtn;
+    private Button mDrawerSetupStorageBtn;
 
     // Integrated VNC Desktop controls
     private VncCanvasView mVncCanvas;
@@ -109,6 +117,10 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
     private ProgressBar mDashCheckSpinner;
     private TextView mDashVerdictBanner;
     private LinearLayout mDashReqsList;
+    private LinearLayout mDashPowerActionsRow;
+    private Button mDashBatteryOptBtn;
+    private Button mDashNotifPermBtn;
+    private Button mDashStoragePermBtn;
 
     // Graphical Mode Card controls
     private RadioButton mUiCliRb;
@@ -142,6 +154,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
     private TerminalSession mCurrentSession;
     private boolean mInitialCheckDone = false;
     private boolean mCheckInFlight = false;
+    private boolean mNotifPromptedThisRun = false;
     private SystemRequirements.Report mLastReport = new SystemRequirements.Report(Collections.emptyList());
     private String mPendingContextUrl = null;
 
@@ -152,7 +165,17 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
             mService = localBinder.getService();
             mBound = true;
             mService.setClientVisible(true);
-            mService.setEventListener(() -> runOnUiThread(MainActivity.this::finish));
+            mService.setEventListener(new DebianTermService.ServiceEventListener() {
+                @Override
+                public void onServiceStopAllRequested() {
+                    runOnUiThread(MainActivity.this::finish);
+                }
+
+                @Override
+                public void onWakeLockStateChanged(boolean held) {
+                    runOnUiThread(MainActivity.this::updateWakeLockUi);
+                }
+            });
             mService.pruneCleanlyFinishedSessions();
 
             List<TerminalSession> sessions = mService.getSessions();
@@ -188,6 +211,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
             }
             refreshDrawerSessions();
             updatePathButtonsForMode();
+            updateWakeLockUi();
         }
 
         @Override
@@ -239,10 +263,45 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
             }
             refreshDrawerSessions();
             updatePathButtonsForMode();
+            updateWakeLockUi();
+        }
+        if (!isTerminalVisible() && !isDesktopVisible() && mInitialCheckDone) {
+            runRequirementsCheckAsync(false);
+        }
+        if (ProotManager.hasSharedStorageAccess(this)) {
+            mBgExecutor.execute(() -> {
+                File rootfs = ProotManager.getRootfsDir(MainActivity.this);
+                if (rootfs.isDirectory() && !new File(rootfs, "root/storage/shared").exists()) {
+                    try {
+                        ProotManager.setupStorageLinks(rootfs);
+                        ProotManager.installLauncherScript(MainActivity.this, mSettings.isProotDisableSeccomp());
+                    } catch (IOException ignored) {
+                    }
+                }
+            });
         }
         if (mTerminalView != null && isTerminalVisible()) {
             mTerminalView.setTerminalCursorBlinkerRate(500);
             mTerminalView.setTerminalCursorBlinkerState(true, true);
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == REQ_POST_NOTIFICATIONS) {
+            if (mService != null) {
+                mService.onSessionStateChanged();
+            }
+            updateWakeLockUi();
+            runRequirementsCheckAsync(false);
+        } else if (requestCode == REQ_STORAGE_PERMISSION) {
+            if (ProotManager.hasSharedStorageAccess(this)) {
+                runSetupStorageFlow();
+            } else {
+                Toast.makeText(this, "Permiso de almacenamiento denegado.", Toast.LENGTH_LONG).show();
+                runRequirementsCheckAsync(false);
+            }
         }
     }
 
@@ -573,6 +632,41 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         mDashReqsList = new LinearLayout(this);
         mDashReqsList.setOrientation(LinearLayout.VERTICAL);
         reqCard.addView(mDashReqsList);
+
+        mDashPowerActionsRow = new LinearLayout(this);
+        mDashPowerActionsRow.setOrientation(LinearLayout.HORIZONTAL);
+        mDashPowerActionsRow.setPadding(0, dp(8), 0, 0);
+        mDashPowerActionsRow.setVisibility(View.GONE);
+
+        mDashBatteryOptBtn = makeActionButton("🔋 Sin restricciones (Doze)", "#9E6A03", v ->
+            requestIgnoreBatteryOptimizations());
+        mDashBatteryOptBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
+        mDashBatteryOptBtn.setVisibility(View.GONE);
+        LinearLayout.LayoutParams batBtnLp = new LinearLayout.LayoutParams(
+            0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        batBtnLp.setMargins(0, 0, dp(4), 0);
+        mDashPowerActionsRow.addView(mDashBatteryOptBtn, batBtnLp);
+
+        mDashNotifPermBtn = makeActionButton("🔔 Activar notificaciones", "#1F6FEB", v ->
+            requestNotificationsPermissionIfNeeded(true));
+        mDashNotifPermBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
+        mDashNotifPermBtn.setVisibility(View.GONE);
+        LinearLayout.LayoutParams notifBtnLp = new LinearLayout.LayoutParams(
+            0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        notifBtnLp.setMargins(dp(4), 0, 0, 0);
+        mDashPowerActionsRow.addView(mDashNotifPermBtn, notifBtnLp);
+
+        reqCard.addView(mDashPowerActionsRow);
+
+        mDashStoragePermBtn = makeActionButton("📁 Configurar almacenamiento (setup-storage)", "#238636", v ->
+            runSetupStorageFlow());
+        mDashStoragePermBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f);
+        mDashStoragePermBtn.setVisibility(View.GONE);
+        LinearLayout.LayoutParams storBtnLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        storBtnLp.setMargins(0, dp(6), 0, 0);
+        reqCard.addView(mDashStoragePermBtn, storBtnLp);
+
         container.addView(reqCard);
 
         // 4. Card 2: Modo de Inicio & Entorno Gráfico (Híbrido: VNC Integrado + Termux:X11)
@@ -1009,6 +1103,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         drawer.setDrawerListener(isOpen -> {
             if (isOpen) {
                 refreshDrawerSessions();
+                updateWakeLockUi();
             } else {
                 mTerminalView.requestFocus();
             }
@@ -1094,6 +1189,12 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
             }
         });
         actions.addView(mDrawerAndroidShellBtn);
+        mDrawerWakeLockBtn = makeDrawerActionButton("⚡ Activar Wake Lock (CPU + WiFi)", "#21262D", v ->
+            toggleWakeLockFromUi());
+        actions.addView(mDrawerWakeLockBtn);
+        mDrawerSetupStorageBtn = makeDrawerActionButton("📁 Configurar almacenamiento (setup-storage)", "#21262D", v ->
+            runSetupStorageFlow());
+        actions.addView(mDrawerSetupStorageBtn);
         actions.addView(makeDrawerActionButton("Panel de Inicio y Requisitos", "#1F6FEB", v -> {
             mDrawerLayout.closeDrawer();
             showDashboardView();
@@ -1189,10 +1290,12 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
             mSettings.getEntryScriptPath(),
             this
         );
+        requestNotificationsPermissionIfNeeded(false);
         switchToSession(session);
         refreshDrawerSessions();
         updateDashboardResumeBar();
         updatePathButtonsForMode();
+        updateWakeLockUi();
     }
 
     private void openNewProotDebianSession() {
@@ -1200,28 +1303,34 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         mSettings.setInstallMode(TerminalSettings.MODE_PROOT);
         showTerminalView();
         TerminalSession session = mService.createProotDebianSession(this);
+        requestNotificationsPermissionIfNeeded(false);
         switchToSession(session);
         refreshDrawerSessions();
         updateDashboardResumeBar();
         updatePathButtonsForMode();
+        updateWakeLockUi();
     }
 
     private void openNewAndroidRootSession() {
         if (mService == null) return;
         showTerminalView();
         TerminalSession session = mService.createAndroidRootSession(this);
+        requestNotificationsPermissionIfNeeded(false);
         switchToSession(session);
         refreshDrawerSessions();
         updateDashboardResumeBar();
+        updateWakeLockUi();
     }
 
     private void openNewAndroidShellSession() {
         if (mService == null) return;
         showTerminalView();
         TerminalSession session = mService.createAndroidShellSession(this);
+        requestNotificationsPermissionIfNeeded(false);
         switchToSession(session);
         refreshDrawerSessions();
         updateDashboardResumeBar();
+        updateWakeLockUi();
     }
 
     private void launchGraphicalDebian(final boolean isRootMode) {
@@ -1304,6 +1413,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
             this
         );
         mActiveDesktopSession = deskSession;
+        requestNotificationsPermissionIfNeeded(false);
         switchToSession(deskSession);
         showDesktopView();
         mDesktopOverlay.setVisibility(View.VISIBLE);
@@ -1360,6 +1470,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         });
         refreshDrawerSessions();
         updateDashboardResumeBar();
+        updateWakeLockUi();
     }
 
     private void openX11DesktopSession(boolean isRootMode) {
@@ -1373,10 +1484,12 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
             mLastReport.desktopStatus,
             this
         );
+        requestNotificationsPermissionIfNeeded(false);
         switchToSession(deskSession);
         showTerminalView();
         refreshDrawerSessions();
         updateDashboardResumeBar();
+        updateWakeLockUi();
 
         Toast.makeText(this, "Iniciando servidor Termux:X11 y escritorio Debian 12...", Toast.LENGTH_SHORT).show();
         mRootFrame.postDelayed(() -> {
@@ -1428,10 +1541,157 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
     }
 
     private void updateSessionTitle() {
+        if (mTitleView == null) return;
         if (mService != null && mCurrentSession != null) {
-            mTitleView.setText(mService.getSessionDisplayName(mCurrentSession));
+            String prefix = mService.isWakeLockHeld() ? "⚡ " : "";
+            mTitleView.setText(prefix + mService.getSessionDisplayName(mCurrentSession));
         } else {
             mTitleView.setText("DebianTerm");
+        }
+    }
+
+    private void toggleWakeLockFromUi() {
+        if (mService == null) return;
+        if (mService.getSessions().isEmpty()) {
+            Toast.makeText(this, "Abre una sesión primero para activar Wake Lock.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        boolean willEnable = !mService.isWakeLockHeld();
+        mService.setWakeLockEnabled(willEnable);
+        updateWakeLockUi();
+        if (willEnable) {
+            requestNotificationsPermissionIfNeeded(false);
+            String msg = DebianTermService.isIgnoringBatteryOptimizations(this)
+                ? "Wake Lock (CPU + WiFi) activado."
+                : "Wake Lock (CPU + WiFi) activo. Recomendado desactivar optimización de batería (Doze).";
+            Toast.makeText(this, msg, Toast.LENGTH_LONG).show();
+        } else {
+            Toast.makeText(this, "Wake Lock liberado.", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void updateWakeLockUi() {
+        updateSessionTitle();
+        if (mDrawerWakeLockBtn != null) {
+            boolean held = mService != null && mService.isWakeLockHeld();
+            boolean wifi = mService != null && mService.isWifiLockHeld();
+            mDrawerWakeLockBtn.setText(held
+                ? (wifi ? "⚡ Wake Lock: ACTIVO (CPU + WiFi)" : "⚡ Wake Lock: ACTIVO (CPU)")
+                : "⚡ Activar Wake Lock (CPU + WiFi)");
+            mDrawerWakeLockBtn.setBackground(makePillBg(held ? "#9E6A03" : "#21262D"));
+        }
+        if (mDrawerSetupStorageBtn != null) {
+            boolean storageOk = ProotManager.hasSharedStorageAccess(this);
+            mDrawerSetupStorageBtn.setText(storageOk
+                ? "📁 Almacenamiento: /sdcard OK"
+                : "📁 Configurar almacenamiento (setup-storage)");
+            mDrawerSetupStorageBtn.setBackground(makePillBg(storageOk ? "#238636" : "#21262D"));
+        }
+    }
+
+    private void requestNotificationsPermissionIfNeeded(boolean openSettingsFallback) {
+        if (DebianTermService.areNotificationsEnabled(this)) {
+            return;
+        }
+        if (Build.VERSION.SDK_INT >= 33) {
+            if (checkSelfPermission(PERM_POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                if (!openSettingsFallback) {
+                    if (!mNotifPromptedThisRun) {
+                        mNotifPromptedThisRun = true;
+                        requestPermissions(new String[]{PERM_POST_NOTIFICATIONS}, REQ_POST_NOTIFICATIONS);
+                    }
+                    return;
+                }
+                if (!mNotifPromptedThisRun || shouldShowRequestPermissionRationale(PERM_POST_NOTIFICATIONS)) {
+                    mNotifPromptedThisRun = true;
+                    requestPermissions(new String[]{PERM_POST_NOTIFICATIONS}, REQ_POST_NOTIFICATIONS);
+                    return;
+                }
+            }
+        }
+        if (!openSettingsFallback) return;
+        try {
+            Intent intent;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                intent = new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                    .putExtra(Settings.EXTRA_APP_PACKAGE, getPackageName());
+            } else {
+                intent = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    Uri.parse("package:" + getPackageName()));
+            }
+            startActivity(intent);
+        } catch (ActivityNotFoundException | SecurityException e) {
+            try {
+                startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    Uri.parse("package:" + getPackageName())));
+            } catch (ActivityNotFoundException ignored) {
+                Toast.makeText(this, "Activa las notificaciones en Ajustes del sistema.", Toast.LENGTH_LONG).show();
+            }
+        }
+    }
+
+    private void requestIgnoreBatteryOptimizations() {
+        if (DebianTermService.isIgnoringBatteryOptimizations(this)) {
+            Toast.makeText(this, "DebianTerm ya está excluida de optimización de batería (Doze).", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        try {
+            startActivity(new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                Uri.parse("package:" + getPackageName())));
+        } catch (ActivityNotFoundException | SecurityException e) {
+            try {
+                startActivity(new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));
+            } catch (ActivityNotFoundException ignored) {
+                Toast.makeText(this, "Desactiva la optimización de batería manualmente en Ajustes.", Toast.LENGTH_LONG).show();
+            }
+        }
+    }
+
+    private void runSetupStorageFlow() {
+        if (ProotManager.hasSharedStorageAccess(this)) {
+            mBgExecutor.execute(() -> {
+                try {
+                    File rootfs = ProotManager.getRootfsDir(MainActivity.this);
+                    if (rootfs.isDirectory()) {
+                        ProotManager.setupStorageLinks(rootfs);
+                        ProotManager.installLauncherScript(MainActivity.this, mSettings.isProotDisableSeccomp());
+                    }
+                    runOnUiThread(() -> {
+                        Toast.makeText(MainActivity.this,
+                            "✓ Almacenamiento configurado: /sdcard y ~/storage listos.",
+                            Toast.LENGTH_LONG).show();
+                        updateWakeLockUi();
+                        runRequirementsCheckAsync(false);
+                    });
+                } catch (IOException e) {
+                    runOnUiThread(() -> Toast.makeText(MainActivity.this,
+                        "Error configurando ~/storage: " + e.getMessage(),
+                        Toast.LENGTH_LONG).show());
+                }
+            });
+            return;
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            Toast.makeText(this,
+                "Activa 'Permitir administrar todos los archivos' para usar /sdcard en Debian Sin Root.",
+                Toast.LENGTH_LONG).show();
+            try {
+                startActivity(new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                    Uri.parse("package:" + getPackageName())));
+            } catch (ActivityNotFoundException | SecurityException e) {
+                try {
+                    startActivity(new Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION));
+                } catch (ActivityNotFoundException ignored) {
+                    Toast.makeText(this,
+                        "Concede acceso a archivos manualmente en Ajustes de Android.",
+                        Toast.LENGTH_LONG).show();
+                }
+            }
+        } else {
+            requestPermissions(new String[]{
+                android.Manifest.permission.READ_EXTERNAL_STORAGE,
+                android.Manifest.permission.WRITE_EXTERNAL_STORAGE
+            }, REQ_STORAGE_PERMISSION);
         }
     }
 
@@ -1655,6 +1915,17 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
                 mDashReqsList.addView(sep, new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, dp(1)));
             }
+        }
+
+        if (mDashPowerActionsRow != null && mDashBatteryOptBtn != null && mDashNotifPermBtn != null) {
+            boolean needBattery = !r.ignoringBatteryOptimizations;
+            boolean needNotif = !r.notificationsEnabled;
+            mDashBatteryOptBtn.setVisibility(needBattery ? View.VISIBLE : View.GONE);
+            mDashNotifPermBtn.setVisibility(needNotif ? View.VISIBLE : View.GONE);
+            mDashPowerActionsRow.setVisibility((needBattery || needNotif) ? View.VISIBLE : View.GONE);
+        }
+        if (mDashStoragePermBtn != null) {
+            mDashStoragePermBtn.setVisibility(r.sharedStorageGranted ? View.GONE : View.VISIBLE);
         }
 
         // 3. Graphical Mode Card update (Termux:X11 detection & recommendation)
@@ -2272,6 +2543,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
                 neutralBtn.setOnClickListener(v -> {
                     String[] opts = {
                         "Abrir sesión Debian 12 (Sin Root)",
+                        "Configurar almacenamiento (setup-storage)",
                         "Regenerar script lanzador PRoot",
                         "Desinstalar Debian 12 PRoot"
                     };
@@ -2282,6 +2554,9 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
                                 dialog.dismiss();
                                 openNewProotDebianSession();
                             } else if (idx == 1) {
+                                dialog.dismiss();
+                                runSetupStorageFlow();
+                            } else if (idx == 2) {
                                 mBgExecutor.execute(() -> {
                                     try {
                                         File rootfs = ProotManager.getRootfsDir(MainActivity.this);
@@ -2297,7 +2572,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
                                             MainActivity.this, "Error: " + e.getMessage(), Toast.LENGTH_LONG).show());
                                     }
                                 });
-                            } else if (idx == 2) {
+                            } else if (idx == 3) {
                                 new AlertDialog.Builder(MainActivity.this)
                                     .setTitle("Desinstalar Debian 12 (Sin Root)")
                                     .setMessage("Se borrarán los archivos del entorno PRoot interno. No afecta ningún chroot con root.")
@@ -2570,6 +2845,64 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
             mExtraKeys.setHapticEnabled(isChecked);
         });
         content.addView(hapticSwitch);
+
+        // 6. Segundo plano y Wake Lock (CPU + WiFi + Doze + Notificaciones)
+        TextView wakeHeader = new TextView(this);
+        wakeHeader.setText("Segundo plano y Wake Lock:");
+        wakeHeader.setTypeface(Typeface.DEFAULT_BOLD);
+        wakeHeader.setPadding(0, dp(14), 0, dp(4));
+        content.addView(wakeHeader);
+
+        Switch autoWakeSwitch = new Switch(this);
+        autoWakeSwitch.setText("Activar Wake Lock (CPU + WiFi) al abrir sesión");
+        autoWakeSwitch.setChecked(mSettings.isAutoWakeLockEnabled());
+        autoWakeSwitch.setOnCheckedChangeListener((buttonView, isChecked) -> {
+            mSettings.setAutoWakeLockEnabled(isChecked);
+            if (isChecked && mService != null && !mService.getSessions().isEmpty()) {
+                mService.setWakeLockEnabled(true);
+                updateWakeLockUi();
+            }
+        });
+        content.addView(autoWakeSwitch);
+
+        final boolean dozeOk = DebianTermService.isIgnoringBatteryOptimizations(this);
+        Button batBtn = makeActionButton(
+            dozeOk ? "✓ Batería sin restricciones (Excluida de Doze)" : "🔋 Desactivar optimización de batería (Doze)",
+            dozeOk ? "#238636" : "#9E6A03",
+            v -> requestIgnoreBatteryOptimizations()
+        );
+        batBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        batBtn.setEnabled(!dozeOk);
+        LinearLayout.LayoutParams batSettingsLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        batSettingsLp.setMargins(0, dp(8), 0, 0);
+        content.addView(batBtn, batSettingsLp);
+
+        if (!DebianTermService.areNotificationsEnabled(this)) {
+            Button notifBtn = makeActionButton(
+                "🔔 Activar notificaciones (Android 13+)",
+                "#1F6FEB",
+                v -> requestNotificationsPermissionIfNeeded(true)
+            );
+            notifBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+            LinearLayout.LayoutParams notifSettingsLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            notifSettingsLp.setMargins(0, dp(6), 0, 0);
+            content.addView(notifBtn, notifSettingsLp);
+        }
+
+        final boolean storageOk = ProotManager.hasSharedStorageAccess(this);
+        Button storageBtn = makeActionButton(
+            storageOk ? "✓ Almacenamiento (/sdcard) concedido — Reconfigurar ~/storage"
+                      : "📁 Configurar almacenamiento (setup-storage)",
+            storageOk ? "#238636" : "#1F6FEB",
+            v -> runSetupStorageFlow()
+        );
+        storageBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        LinearLayout.LayoutParams storSettingsLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        storSettingsLp.setMargins(0, dp(6), 0, 0);
+        content.addView(storageBtn, storSettingsLp);
 
         ScrollView scroll = new ScrollView(this);
         scroll.addView(content);

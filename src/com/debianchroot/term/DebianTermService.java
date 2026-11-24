@@ -5,7 +5,9 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
+import android.content.Context;
 import android.content.Intent;
+import android.net.wifi.WifiManager;
 import android.os.Binder;
 import android.os.Build;
 import android.os.IBinder;
@@ -55,6 +57,7 @@ public final class DebianTermService extends Service {
 
     public interface ServiceEventListener {
         void onServiceStopAllRequested();
+        void onWakeLockStateChanged(boolean held);
     }
 
     private final IBinder mBinder = new LocalBinder();
@@ -62,10 +65,28 @@ public final class DebianTermService extends Service {
     private final Map<TerminalSession, String> mSessionNames = new HashMap<>();
     private final Map<TerminalSession, SessionKind> mSessionKinds = new HashMap<>();
     private PowerManager.WakeLock mWakeLock;
+    private WifiManager.WifiLock mWifiLock;
     private boolean mClientVisible = false;
     private boolean mIsForeground = false;
     private ServiceEventListener mEventListener;
     private final android.os.Handler mMainHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+
+    public static boolean isIgnoringBatteryOptimizations(Context context) {
+        if (context == null) return false;
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return true;
+        PowerManager pm = (PowerManager) context.getSystemService(Context.POWER_SERVICE);
+        return pm != null && pm.isIgnoringBatteryOptimizations(context.getPackageName());
+    }
+
+    public static boolean areNotificationsEnabled(Context context) {
+        if (context == null) return false;
+        NotificationManager nm = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
+        if (nm == null) return true;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            return nm.areNotificationsEnabled();
+        }
+        return true;
+    }
 
     /**
      * Returns the lowest positive session index (1, 2, 3...) not currently used
@@ -111,10 +132,16 @@ public final class DebianTermService extends Service {
         if (intent != null) {
             String action = intent.getAction();
             if (ACTION_STOP_ALL.equals(action)) {
+                if (!mIsForeground) {
+                    startForeground(NOTIFICATION_ID, buildNotification());
+                    mIsForeground = true;
+                }
                 stopAllSessionsAndSelf();
                 return START_NOT_STICKY;
             } else if (ACTION_TOGGLE_WAKELOCK.equals(action)) {
-                toggleWakeLock();
+                if (!mSessions.isEmpty()) {
+                    toggleWakeLock();
+                }
             }
         }
         if (mSessions.isEmpty()) {
@@ -278,10 +305,9 @@ public final class DebianTermService extends Service {
             return createRawSession("/system/bin/sh", msgCmd, allocateSessionName("Debian 12 (Sin Root) #"), SessionKind.DEBIAN_PROOT, client);
         }
         try {
-            if (!script.exists() || !script.canExecute()) {
-                boolean noSeccomp = new TerminalSettings(this).isProotDisableSeccomp();
-                script = ProotManager.installLauncherScript(this, noSeccomp);
-            }
+            boolean noSeccomp = new TerminalSettings(this).isProotDisableSeccomp();
+            script = ProotManager.installLauncherScript(this, noSeccomp);
+            ProotManager.setupStorageLinks(rootfs);
         } catch (java.io.IOException e) {
             String errCmd = "echo " + ChrootManager.shellQuote("Error preparando script PRoot: " + e.getMessage())
                 + "; exec /system/bin/sh";
@@ -451,6 +477,10 @@ public final class DebianTermService extends Service {
         mSessions.add(session);
         mSessionNames.put(session, defaultName);
         mSessionKinds.put(session, kind);
+        if (!isWakeLockHeld() && new TerminalSettings(this).isAutoWakeLockEnabled()) {
+            acquireWakeLock();
+            notifyWakeLockChanged();
+        }
         ensureForegroundStarted();
         return session;
     }
@@ -470,6 +500,7 @@ public final class DebianTermService extends Service {
         mSessionNames.clear();
         mSessionKinds.clear();
         releaseWakeLock();
+        notifyWakeLockChanged();
 
         for (TerminalSession s : toClose) {
             s.finishGracefully(GRACEFUL_EXIT_TIMEOUT_MS);
@@ -526,31 +557,86 @@ public final class DebianTermService extends Service {
         return mWakeLock != null && mWakeLock.isHeld();
     }
 
-    public void toggleWakeLock() {
-        if (isWakeLockHeld()) {
-            releaseWakeLock();
-        } else {
-            acquireWakeLock();
-        }
-        updateNotification();
+    public boolean isWifiLockHeld() {
+        return mWifiLock != null && mWifiLock.isHeld();
     }
 
+    public void setWakeLockEnabled(boolean enabled) {
+        if (enabled) {
+            acquireWakeLock();
+        } else {
+            releaseWakeLock();
+        }
+        updateNotification();
+        notifyWakeLockChanged();
+    }
+
+    public void toggleWakeLock() {
+        setWakeLockEnabled(!isWakeLockHeld());
+    }
+
+    @SuppressWarnings("deprecation")
     private void acquireWakeLock() {
         if (mWakeLock == null) {
             PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
             if (pm != null) {
-                mWakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "DebianTerm:SessionWakeLock");
-                mWakeLock.setReferenceCounted(false);
+                try {
+                    mWakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "DebianTerm:SessionWakeLock");
+                    mWakeLock.setReferenceCounted(false);
+                } catch (RuntimeException ignored) {
+                    mWakeLock = null;
+                }
             }
         }
         if (mWakeLock != null && !mWakeLock.isHeld()) {
-            mWakeLock.acquire();
+            try {
+                mWakeLock.acquire();
+            } catch (RuntimeException ignored) {
+            }
+        }
+
+        if (mWifiLock == null) {
+            WifiManager wm = (WifiManager) getApplicationContext().getSystemService(WIFI_SERVICE);
+            if (wm != null) {
+                try {
+                    mWifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "DebianTerm:SessionWifiLock");
+                    mWifiLock.setReferenceCounted(false);
+                } catch (RuntimeException ignored) {
+                    mWifiLock = null;
+                }
+            }
+        }
+        if (mWifiLock != null && !mWifiLock.isHeld()) {
+            try {
+                mWifiLock.acquire();
+            } catch (RuntimeException ignored) {
+            }
         }
     }
 
     private void releaseWakeLock() {
         if (mWakeLock != null && mWakeLock.isHeld()) {
-            mWakeLock.release();
+            try {
+                mWakeLock.release();
+            } catch (RuntimeException ignored) {
+            }
+        }
+        if (mWifiLock != null && mWifiLock.isHeld()) {
+            try {
+                mWifiLock.release();
+            } catch (RuntimeException ignored) {
+            }
+        }
+    }
+
+    private void notifyWakeLockChanged() {
+        if (mEventListener != null) {
+            final boolean held = isWakeLockHeld();
+            mMainHandler.post(() -> {
+                if (mEventListener != null) {
+                    mEventListener.onWakeLockStateChanged(held);
+                }
+            });
         }
     }
 
@@ -568,6 +654,7 @@ public final class DebianTermService extends Service {
     private void stopForegroundAndSelfIfEmpty() {
         if (!mSessions.isEmpty()) return;
         releaseWakeLock();
+        notifyWakeLockChanged();
         if (mIsForeground) {
             stopForeground(true);
             mIsForeground = false;
@@ -609,6 +696,13 @@ public final class DebianTermService extends Service {
         }
     }
 
+    private PendingIntent createServiceActionPendingIntent(int requestCode, Intent intent, int flags) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            return PendingIntent.getForegroundService(this, requestCode, intent, flags);
+        }
+        return PendingIntent.getService(this, requestCode, intent, flags);
+    }
+
     private Notification buildNotification() {
         int flags = PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE;
 
@@ -618,11 +712,11 @@ public final class DebianTermService extends Service {
 
         Intent exitIntent = new Intent(this, DebianTermService.class);
         exitIntent.setAction(ACTION_STOP_ALL);
-        PendingIntent exitPi = PendingIntent.getService(this, 1, exitIntent, flags);
+        PendingIntent exitPi = createServiceActionPendingIntent(1, exitIntent, flags);
 
         Intent wakeIntent = new Intent(this, DebianTermService.class);
         wakeIntent.setAction(ACTION_TOGGLE_WAKELOCK);
-        PendingIntent wakePi = PendingIntent.getService(this, 2, wakeIntent, flags);
+        PendingIntent wakePi = createServiceActionPendingIntent(2, wakeIntent, flags);
 
         int running = getRunningSessionCount();
         int total = mSessions.size();
@@ -635,7 +729,7 @@ public final class DebianTermService extends Service {
             text = "Sin sesiones activas";
         }
         if (isWakeLockHeld()) {
-            text += " • Wake Lock ON";
+            text += isWifiLockHeld() ? " • Wake+WiFi ON" : " • Wake Lock ON";
         }
 
         Notification.Builder builder = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O

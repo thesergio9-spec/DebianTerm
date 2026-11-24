@@ -392,7 +392,7 @@ public final class TarExtractor {
         file.setExecutable(ownerExec || anyExec, (mode & 0011) == 0);
     }
 
-    private static void createSymlink(String linkTarget, File destFile) throws IOException {
+    public static void createSymlink(String linkTarget, File destFile) throws IOException {
         try {
             Os.symlink(linkTarget, destFile.getAbsolutePath());
         } catch (ErrnoException e) {

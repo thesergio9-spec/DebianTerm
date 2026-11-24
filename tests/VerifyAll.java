@@ -53,6 +53,8 @@ import java.util.zip.Deflater;
  * 10) Graphical DesktopManager scripts (XFCE4/LXDE VNC, Termux:X11)
  * 11) Pure-Java RFB 3.8 client protocol (Raw + Zlib + CopyRect + CutText + input)
  * 12) Session numbering reuse & lifecycle API (lowest available #N, SessionKind, pruning)
+ * 13) WakeLock + WifiLock + AutoWakeLock + Doze/Notifications API & Manifest permissions
+ * 14) setup-storage permissions, ProotManager ~/storage symlinks, CLI script & /sdcard bindings
  */
 public final class VerifyAll {
 
@@ -120,7 +122,9 @@ public final class VerifyAll {
         testDesktopManagerScripts();
         testRfbClientProtocol();
         testSessionNumberingAndLifecycleApi();
-        System.out.println("ALL 12 VERIFICATION TESTS PASSED.");
+        testWakeLockAndPowerApi();
+        testSetupStorageAndProotBindings();
+        System.out.println("ALL 14 VERIFICATION TESTS PASSED.");
     }
 
     private static void testDecset2026() {
@@ -721,6 +725,134 @@ public final class VerifyAll {
             "onSessionStateChanged must be public");
 
         System.out.println("[PASS] Test 12: Session numbering reuse (#1), SessionKind & lifecycle pruning API");
+    }
+
+    private static void testWakeLockAndPowerApi() throws Exception {
+        Class<?> ctxCls = Class.forName("android.content.Context");
+
+        String actionToggle = (String) DebianTermService.class.getField("ACTION_TOGGLE_WAKELOCK").get(null);
+        check("com.debianchroot.term.ACTION_TOGGLE_WAKELOCK".equals(actionToggle),
+            "Unexpected ACTION_TOGGLE_WAKELOCK: " + actionToggle);
+
+        check(Modifier.isPublic(DebianTermService.class.getMethod("isWakeLockHeld").getModifiers()),
+            "isWakeLockHeld must be public");
+        check(Modifier.isPublic(DebianTermService.class.getMethod("isWifiLockHeld").getModifiers()),
+            "isWifiLockHeld must be public");
+        check(Modifier.isPublic(DebianTermService.class.getMethod("setWakeLockEnabled", boolean.class).getModifiers()),
+            "setWakeLockEnabled(boolean) must be public");
+        check(Modifier.isPublic(DebianTermService.class.getMethod("toggleWakeLock").getModifiers()),
+            "toggleWakeLock must be public");
+
+        Method ignoreBat = DebianTermService.class.getMethod("isIgnoringBatteryOptimizations", ctxCls);
+        check(Modifier.isPublic(ignoreBat.getModifiers()) && Modifier.isStatic(ignoreBat.getModifiers())
+            && ignoreBat.getReturnType() == boolean.class,
+            "isIgnoringBatteryOptimizations(Context) must be public static boolean");
+
+        Method notifEnabled = DebianTermService.class.getMethod("areNotificationsEnabled", ctxCls);
+        check(Modifier.isPublic(notifEnabled.getModifiers()) && Modifier.isStatic(notifEnabled.getModifiers())
+            && notifEnabled.getReturnType() == boolean.class,
+            "areNotificationsEnabled(Context) must be public static boolean");
+
+        Class<?> listenerCls = Class.forName("com.debianchroot.term.DebianTermService$ServiceEventListener");
+        check(listenerCls.getMethod("onServiceStopAllRequested") != null,
+            "ServiceEventListener.onServiceStopAllRequested must exist");
+        check(listenerCls.getMethod("onWakeLockStateChanged", boolean.class) != null,
+            "ServiceEventListener.onWakeLockStateChanged(boolean) must exist");
+
+        Method isAutoWake = TerminalSettings.class.getMethod("isAutoWakeLockEnabled");
+        Method setAutoWake = TerminalSettings.class.getMethod("setAutoWakeLockEnabled", boolean.class);
+        check(Modifier.isPublic(isAutoWake.getModifiers()) && isAutoWake.getReturnType() == boolean.class,
+            "isAutoWakeLockEnabled must be public boolean");
+        check(Modifier.isPublic(setAutoWake.getModifiers()),
+            "setAutoWakeLockEnabled(boolean) must be public");
+
+        check(SystemRequirements.Report.class.getField("ignoringBatteryOptimizations").getType() == boolean.class,
+            "Report.ignoringBatteryOptimizations must be boolean");
+        check(SystemRequirements.Report.class.getField("notificationsEnabled").getType() == boolean.class,
+            "Report.notificationsEnabled must be boolean");
+
+        String manifest = new String(Files.readAllBytes(Paths.get("AndroidManifest.xml")), StandardCharsets.UTF_8);
+        check(manifest.contains("android.permission.WAKE_LOCK"),
+            "AndroidManifest must declare WAKE_LOCK");
+        check(manifest.contains("android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"),
+            "AndroidManifest must declare REQUEST_IGNORE_BATTERY_OPTIMIZATIONS");
+        check(manifest.contains("android.permission.POST_NOTIFICATIONS"),
+            "AndroidManifest must declare POST_NOTIFICATIONS");
+
+        System.out.println("[PASS] Test 13: WakeLock + WifiLock + AutoWakeLock + Doze/Notifications API & Manifest");
+    }
+
+    private static void testSetupStorageAndProotBindings() throws Exception {
+        String setupScript = ProotManager.generateSetupStorageScript();
+        check(setupScript.contains("/sdcard") && setupScript.contains("/root/storage")
+            && setupScript.contains("downloads") && setupScript.contains("shared"),
+            "setup-storage script missing expected paths");
+
+        Path tmpScript = Paths.get("/tmp/test-setup-storage.sh");
+        Files.write(tmpScript, setupScript.getBytes(StandardCharsets.UTF_8));
+        try {
+            Process p = new ProcessBuilder("sh", "-n", tmpScript.toString()).start();
+            int rc = p.waitFor();
+            check(rc == 0, "setup-storage sh -n failed with exit code " + rc);
+        } finally {
+            Files.deleteIfExists(tmpScript);
+        }
+
+        String prootLaunch = ProotManager.generateProotLauncherScript(
+            "/data/app/x/lib/arm64",
+            "/data/user/0/com.debianchroot.term/files",
+            "/data/user/0/com.debianchroot.term/files/debian12-proot",
+            true
+        );
+        check(prootLaunch.contains("--bind=/storage/emulated/0:/sdcard"),
+            "PRoot launcher must bind /storage/emulated/0:/sdcard");
+        check(prootLaunch.contains("--bind=/storage/emulated/0:/storage/emulated/0"),
+            "PRoot launcher must bind /storage/emulated/0:/storage/emulated/0");
+        check(prootLaunch.contains("/external_sd"),
+            "PRoot launcher must support optional /external_sd bind");
+
+        Path sandbox = Files.createTempDirectory("debianterm-storage-test");
+        File fakeRootfs = sandbox.toFile();
+        try {
+            ProotManager.setupStorageLinks(fakeRootfs);
+
+            Path sharedLink = Paths.get(fakeRootfs.getAbsolutePath(), "root/storage/shared");
+            Path downloadsLink = Paths.get(fakeRootfs.getAbsolutePath(), "root/storage/downloads");
+            Path setupAlias = Paths.get(fakeRootfs.getAbsolutePath(), "usr/local/bin/setup-storage");
+            File setupBin = new File(fakeRootfs, "usr/local/bin/debianterm-setup-storage");
+
+            check(Files.isSymbolicLink(sharedLink)
+                && "/sdcard".equals(Files.readSymbolicLink(sharedLink).toString()),
+                "~/storage/shared symlink target mismatch");
+            check(Files.isSymbolicLink(downloadsLink)
+                && "/sdcard/Download".equals(Files.readSymbolicLink(downloadsLink).toString()),
+                "~/storage/downloads symlink target mismatch");
+            check(setupBin.isFile() && setupBin.canExecute(),
+                "debianterm-setup-storage script must exist and be executable");
+            check(Files.isSymbolicLink(setupAlias)
+                && "debianterm-setup-storage".equals(Files.readSymbolicLink(setupAlias).toString()),
+                "setup-storage alias symlink target mismatch");
+        } finally {
+            TarExtractor.deleteRecursivelyNoFollow(fakeRootfs);
+        }
+
+        Class<?> ctxCls = Class.forName("android.content.Context");
+        Method hasStorage = ProotManager.class.getMethod("hasSharedStorageAccess", ctxCls);
+        check(Modifier.isPublic(hasStorage.getModifiers()) && Modifier.isStatic(hasStorage.getModifiers())
+            && hasStorage.getReturnType() == boolean.class,
+            "hasSharedStorageAccess(Context) must be public static boolean");
+        check(SystemRequirements.Report.class.getField("sharedStorageGranted").getType() == boolean.class,
+            "Report.sharedStorageGranted must be boolean");
+
+        String manifest = new String(Files.readAllBytes(Paths.get("AndroidManifest.xml")), StandardCharsets.UTF_8);
+        check(manifest.contains("android.permission.READ_EXTERNAL_STORAGE"),
+            "AndroidManifest must declare READ_EXTERNAL_STORAGE");
+        check(manifest.contains("android.permission.WRITE_EXTERNAL_STORAGE"),
+            "AndroidManifest must declare WRITE_EXTERNAL_STORAGE");
+        check(manifest.contains("android.permission.MANAGE_EXTERNAL_STORAGE"),
+            "AndroidManifest must declare MANAGE_EXTERNAL_STORAGE");
+
+        System.out.println("[PASS] Test 14: setup-storage permissions, ~/storage symlinks, CLI script & /sdcard bindings");
     }
 
     private static String fetchText(String urlStr) throws Exception {

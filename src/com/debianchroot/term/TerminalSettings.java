@@ -28,6 +28,7 @@ public final class TerminalSettings {
     private static final String KEY_DESKTOP_ENV = "desktop_env";
     private static final String KEY_GUI_BACKEND = "gui_backend";
     private static final String KEY_GUI_RESOLUTION = "gui_resolution";
+    private static final String KEY_AUTO_WAKELOCK = "auto_wakelock";
 
     public static final String MODE_ROOT = "root";
     public static final String MODE_PROOT = "proot";
@@ -193,6 +194,14 @@ public final class TerminalSettings {
 
     public void setAutoEnterTerminal(boolean enabled) {
         mPrefs.edit().putBoolean(KEY_AUTO_ENTER_TERMINAL, enabled).apply();
+    }
+
+    public boolean isAutoWakeLockEnabled() {
+        return mPrefs.getBoolean(KEY_AUTO_WAKELOCK, false);
+    }
+
+    public void setAutoWakeLockEnabled(boolean enabled) {
+        mPrefs.edit().putBoolean(KEY_AUTO_WAKELOCK, enabled).apply();
     }
 
     public boolean isProotDisableSeccomp() {

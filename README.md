@@ -1,6 +1,6 @@
 # DebianTerm
 
-**DebianTerm** (v2.1.1) es un **instalador completo de Debian 12 (Bookworm)** y emulador de terminal + escritorio gráfico para Android basado en el motor y teclado de Termux (`terminal-emulator` y `terminal-view`), con **verificación de requerimientos mínimos al iniciar**, selector **Terminal (CLI) vs Modo Gráfico Híbrido** y **dos caminos de ejecución totalmente funcionales**:
+**DebianTerm** (v2.1.2) es un **instalador completo de Debian 12 (Bookworm)** y emulador de terminal + escritorio gráfico para Android basado en el motor y teclado de Termux (`terminal-emulator` y `terminal-view`), con **verificación de requerimientos mínimos al iniciar**, selector **Terminal (CLI) vs Modo Gráfico Híbrido** y **dos caminos de ejecución totalmente funcionales**:
 
 1. **Camino 1 — Con Root (Chroot Nativo)**: máximo rendimiento del kernel Linux y montajes reales para dispositivos con Magisk, KernelSU o APatch.
 2. **Camino 2 — Sin Root (PRoot Integrado)**: motor `PRoot` empaquetado directamente en el APK (`arm64-v8a` y `armeabi-v7a`), **100% independiente de Termux**, para dispositivos sin acceso root.
@@ -12,11 +12,11 @@ Coexiste de forma independiente junto a Termux (`com.termux`) usando su propio p
 ## 📥 Descarga Rápida
 
 Descarga el APK compilado desde la última Release:
-- **[DebianTerm.apk (v2.1.1)](https://github.com/thesergio9-spec/DebianTerm/releases/download/v2.1.1/DebianTerm.apk)**
+- **[DebianTerm.apk (v2.1.2)](https://github.com/thesergio9-spec/DebianTerm/releases/download/v2.1.2/DebianTerm.apk)**
 
 ---
 
-## 🚀 Características Principales (v2.1.1)
+## 🚀 Características Principales (v2.1.2)
 
 ### 1. Panel de Inicio y Verificación de Requerimientos Mínimos
 Al abrir la app se ejecuta automáticamente un diagnóstico (`SystemRequirements`) antes de instalar o iniciar Debian 12:
@@ -56,12 +56,13 @@ En la tarjeta **Modo de Inicio**, antes de abrir Debian 12 en cualquiera de los 
 #### Camino 2: Sin Root (PRoot Integrado en el APK)
 - Incluye `libproot.so`, `libproot_loader.so` y `libproot_loader32.so` (`arm64-v8a` y `armeabi-v7a`) compilados con `targetSdkVersion=28` para permitir ejecución y mapeo binario en almacenamiento interno (`untrusted_app_27`) en Android 10–15.
 - Extractor **100% Java (`TarExtractor`)** con soporte USTAR, PAX, GNU LongName, permisos seguros de usuario, symlinks, hardlinks, exclusión segura de `/dev/*` y protección contra *path traversal*.
+- **Acceso a almacenamiento compartido (`setup-storage`)**: permisos completos (`READ/WRITE/MANAGE_EXTERNAL_STORAGE` para Android 7–15), botón en Panel de Inicio/Menú Lateral/Ajustes y comando `setup-storage` dentro de Debian para enlazar `/sdcard`, `/storage/emulated/0`, `/external_sd` y `~/storage/{shared,downloads,dcim,documents,pictures,music,movies}`.
 - Entorno preconfigurado en `<filesDir>/debian12-proot`: DNS (`1.1.1.1`, `8.8.8.8`), grupos Android (`aid_inet`), APT (`APT::Sandbox::User "root"`, `policy-rc.d`), detección automática de compatibilidad `PROOT_NO_SECCOMP` y archivos virtuales `/proc/*` para herramientas CLI (`ps`, `top`, `free`, `apt`, `python3`).
 
 ### 4. Corrección del "Rebobinado" y Teclado Extra de Termux
 - **Modo Pan sin `SIGWINCH` (`soft-keyboard-pan-main-screen`)**: desacopla las filas visibles de las filas reales del PTY.
 - **Salida Sincronizada (`DECSET 2026`)**: soporte completo `CSI ? 2026 h/l` y `DECRQM`.
-- **Scrollback Anclado a Filas de Documento** y barra de teclas extra configurables (`ESC`, `TAB`, `CTRL`, `ALT`, flechas, etc.), más 5 temas de color y servicio en primer plano con *Wake Lock*.
+- **Scrollback Anclado a Filas de Documento** y barra de teclas extra configurables (`ESC`, `TAB`, `CTRL`, `ALT`, flechas, etc.), más 5 temas de color y servicio en primer plano con **Wake Lock completo (`PARTIAL_WAKE_LOCK` + `WifiLock`)**, control rápido en el menú lateral (`⚡`), modo automático opcional en Ajustes, botón de exclusión de batería (*Doze*) y soporte de notificaciones Android 13+.
 
 ---
 
@@ -91,7 +92,7 @@ DebianTerm/
 ├── libs/                        # Bibliotecas JAR (annotation-1.5.0, xz-1.9)
 ├── jniLibs/                     # Binarios nativos arm64-v8a y armeabi-v7a:
 │   │                            # libtermux.so, libproot.so, libproot_loader.so, libproot_loader32.so
-├── tests/                       # Suite de 12 pruebas unitarias en JVM (VerifyAll.java)
+├── tests/                       # Suite de 14 pruebas unitarias en JVM (VerifyAll.java)
 ├── setup-deps.sh                # Descarga código base Termux, JARs, libtermux.so y binarios PRoot
 └── build.sh                     # Compilación completa (aapt2, javac, d8, zipalign, apksigner)
 ```
@@ -118,7 +119,7 @@ El APK resultante se generará en `build/DebianTerm-release.apk`.
 
 ## 🧪 Pruebas Unitarias
 
-La suite [VerifyAll.java](tests/VerifyAll.java) valida en JVM las **12 pruebas clave**:
+La suite [VerifyAll.java](tests/VerifyAll.java) valida en JVM las **14 pruebas clave**:
 1. Salida sincronizada `DECSET 2026` + consultas `DECRQM`.
 2. Modo Pan del teclado sin pérdida de scrollback ni redimensionamiento PTY (`SIGWINCH`).
 3. Parser en vivo del índice LXC (`bookworm` / `trixie`) y verificación `SHA256SUMS`.
@@ -131,6 +132,8 @@ La suite [VerifyAll.java](tests/VerifyAll.java) valida en JVM las **12 pruebas c
 10. Generación y validación `sh -n` de scripts gráficos (`DesktopManager`: XFCE4, LXDE, `Xtigervnc`, `Termux:X11` y URL oficial APK).
 11. Protocolo cliente RFB 3.8 (`RfbClient`) contra servidor VNC simulado (Raw + Zlib + CopyRect + `ServerCutText` + eventos de puntero/teclado).
 12. Numeración reutilizable de sesiones (`#1` desde el menor índice libre), `SessionKind` y limpieza de sesiones finalizadas (`DebianTermService`).
+13. Wake Lock completo (`PARTIAL_WAKE_LOCK` + `WifiLock`), preferencia automática, estado Doze/Notificaciones (`SystemRequirements`) y permisos en `AndroidManifest.xml`.
+14. Soporte `setup-storage` (permisos de almacenamiento, symlinks `~/storage/*`, script CLI `setup-storage` validado con `sh -n` y bindings `/sdcard` en PRoot).
 
 ```bash
 javac -encoding UTF-8 -cp build/classes:/opt/android-sdk/android.jar:libs/xz-1.9.jar -d build/test-classes tests/VerifyAll.java
