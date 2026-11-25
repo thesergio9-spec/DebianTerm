@@ -5,8 +5,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/thesergio9-spec/DebianTerm/releases/tag/v2.4.1">
-    <img src="https://img.shields.io/badge/release-v2.4.1-D70A53?style=flat-square" alt="Release v2.4.1">
+  <a href="https://github.com/thesergio9-spec/DebianTerm/releases/tag/v2.4.2">
+    <img src="https://img.shields.io/badge/release-v2.4.2-D70A53?style=flat-square" alt="Release v2.4.2">
   </a>
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/license-GPLv3-blue?style=flat-square" alt="Licencia GPLv3">
@@ -17,7 +17,7 @@
   </a>
 </p>
 
-**DebianTerm** (`v2.4.1`) es un **instalador completo de Debian 12 (Bookworm)** y emulador de terminal + escritorio gráfico para Android basado en el motor y teclado de Termux (`terminal-emulator` y `terminal-view`), con **verificación de requerimientos mínimos al iniciar**, selector **Terminal (CLI) vs Modo Gráfico Híbrido** y **dos caminos de ejecución totalmente funcionales**:
+**DebianTerm** (`v2.4.2`) es un **instalador completo de Debian 12 (Bookworm)** y emulador de terminal + escritorio gráfico para Android basado en el motor y teclado de Termux (`terminal-emulator` y `terminal-view`), con **verificación de requerimientos mínimos al iniciar**, selector **Terminal (CLI) vs Modo Gráfico Híbrido** y **dos caminos de ejecución totalmente funcionales**:
 
 1. **Camino 1 — Con Root (Chroot Nativo)**: máximo rendimiento del kernel Linux y montajes reales para dispositivos con Magisk, KernelSU o APatch.
 2. **Camino 2 — Sin Root (PRoot Integrado)**: motor `PRoot` empaquetado directamente en el APK (`arm64-v8a` y `armeabi-v7a`), **100% independiente de Termux**, para dispositivos sin acceso root.
@@ -45,7 +45,7 @@ Coexiste de forma independiente junto a Termux (`com.termux`) usando su propio p
 
 Descarga el APK compilado desde la última Release:
 
-- **[DebianTerm.apk (v2.4.1)](https://github.com/thesergio9-spec/DebianTerm/releases/download/v2.4.1/DebianTerm.apk)**
+- **[DebianTerm.apk (v2.4.2)](https://github.com/thesergio9-spec/DebianTerm/releases/download/v2.4.2/DebianTerm.apk)**
 
 ---
 
@@ -60,7 +60,7 @@ DebianTerm es software libre sin publicidad, sin telemetría y con código verif
 
 ---
 
-## 🚀 Características Principales (`v2.4.1`)
+## 🚀 Características Principales (`v2.4.2`)
 
 ### 1. Panel de Inicio y Verificación de Requerimientos Mínimos
 Al abrir la app se ejecuta automáticamente un diagnóstico (`SystemRequirements`) antes de instalar o iniciar Debian 12:
@@ -79,11 +79,12 @@ Al abrir la app se ejecuta automáticamente un diagnóstico (`SystemRequirements
 - **Camino 1 — Con Root (Chroot Nativo)**: detección segura de `/data/local/debian`, script `/data/local/bin/debian` con aislamiento `env -i`, montajes con `timeout 5`, contador `/dev/chroot_sessions` con desmontaje automático al cerrar la última sesión y subcomandos `status`, `stop`/`umount`, `exec`.
 - **Camino 2 — Sin Root (PRoot Integrado)**: binarios `libproot.so`, `libproot_loader.so`, `libproot_loader32.so`, extractor Java `TarExtractor` (`USTAR`, `PAX`, `GNU LongName`, symlinks, hardlinks, omisión de `/dev/*`, protección *path traversal*), DNS (`1.1.1.1`, `8.8.8.8`), `aid_inet`, APT sin sandbox, auto-detección `PROOT_NO_SECCOMP` y **`setup-storage`**.
 
-### 4. Menú Lateral Simplificado, Productividad y Gráficos Sixel
-- **Menú Lateral Compacto de 3 Filas (Nuevo en `v2.4.1`)**: sustituye la lista vertical larga por 3 filas inferiores organizadas (**`+ Nueva sesión`** -> selector Root / PRoot / Shell Android; **`Wake`** + **`Herramientas`** -> Snippets / `setup-storage` / SAF / Respaldos / Autoarranque; **`Inicio` / `Ajustes` / `Acerca`**), dando mucho más espacio a las sesiones activas.
-- **Modo Pan sin `SIGWINCH` + `DECSET 2026`**: evita rebobinado al abrir el teclado Android y soporta salida sincronizada `CSI ? 2026 h/l` + `DECRQM`.
-- **Gráficos Sixel inline (`SixelDecoder` / `SixelImage`)**: decodificador nativo DEC VT340/XTerm (`img2sixel`, `chafa`, `lsix`, `gnuplot`), reporte DA1 (`;4;`) y `XTSMGRAPHICS` (`256` colores), anclaje al *scrollback* y demo directa en **Ajustes rápidos**.
-- **Búsqueda en Terminal (`TerminalSearch`)**: sobre las 4,000 líneas del historial con sensibilidad `Aa`, `▲`/`▼` y copia rápida.
+### 4. Menú Lateral Simplificado, Antirebobinado y Productividad
+- **Menú Lateral Compacto de 3 Filas:** organiza las acciones en 3 filas inferiores (**`+ Nueva sesión`** -> selector Root / PRoot / Shell Android; **`Wake`** + **`Herramientas`** -> Snippets / `setup-storage` / SAF / Respaldos / Autoarranque; **`Inicio` / `Ajustes` / `Acerca`**), dejando mucho más espacio libre para sesiones activas.
+- **Motor Antirebobinado para Conversaciones Largas (`v2.4.2`):** cola PTY de 128 KB con drenaje en ráfaga (512 KB / 12 ms), `DECSET 2026` extendido hasta 1000 ms (guardia de inactividad de 250 ms), coalescencia tras borrados completos `CSI 2 J` / `3 J` (16–64 ms), preservación del scroll al leer arriba durante redibujados `CSI 3 J` e histéresis de altura sin falsos `SIGWINCH` al abrir teclado o barras (`🔍` / `📝`).
+- **Salida Segura con `exit` y Wake Lock Sincronizado (`v2.4.2`):** al ejecutar `exit` en la única sesión interactiva activa cierra Wake/WiFi Lock, detiene `DebianTermService` y cierra la app (`finishAndRemoveTask`); con varias sesiones abiertas solo cierra esa pestaña. La cortina de notificaciones (`Activar Wake` / `Soltar Wake`) se sincroniza en vivo con el título y el menú lateral.
+- **Gráficos Sixel inline (`SixelDecoder` / `SixelImage`):** decodificador nativo DEC VT340/XTerm (`img2sixel`, `chafa`, `lsix`, `gnuplot`), reporte DA1 (`;4;`) y `XTSMGRAPHICS` (`256` colores), anclaje al *scrollback* y demo directa en **Ajustes rápidos**.
+- **Búsqueda en Terminal (`TerminalSearch`) sobre 10,000 líneas:** historial ampliado a 10,000 filas con sensibilidad `Aa`, `▲`/`▼` y copia rápida.
 - **Snippets (`SnippetManager`) y Barra Gboard/Voz (`📝`)**: comandos rápidos y barra de entrada deslizable con autocorrección y dictado.
 - **Mitigador de *Phantom Process Killer* (`PhantomProcessManager`)**: detecta `signal 9` en Android 12–15 y ofrece fix directo con Root o comandos ADB exactos sin Root.
 - **Storage Access Framework (`DebianDocumentsProvider`)**: acceso a `/root` sin root desde Material Files, Acode, QuickEdit o Archivos sin copiar por `/sdcard`.
@@ -109,7 +110,7 @@ DebianTerm/
 │   └── com/termux/view/         # Renderizador terminal con Sixel inline y gestos
 ├── libs/                        # Bibliotecas JAR (annotation-1.5.0, xz-1.9)
 ├── jniLibs/                     # Binarios nativos arm64-v8a y armeabi-v7a
-├── tests/                       # Suite de 23 pruebas unitarias en JVM (VerifyAll.java)
+├── tests/                       # Suite de 26 pruebas unitarias en JVM (VerifyAll.java)
 ├── setup-deps.sh                # Descarga componentes base Termux, JARs y PRoot (SHA-256)
 └── build.sh                     # Compilación completa (aapt2, javac, d8, zipalign, apksigner)
 ```
@@ -131,7 +132,7 @@ El APK firmado se genera en `build/DebianTerm-release.apk`.
 
 ## 🧪 Pruebas Unitarias
 
-La suite [VerifyAll.java](tests/VerifyAll.java) valida en JVM **23 pruebas clave** (`DECSET 2026`, modo Pan, parser LXC/SHA-256, scripts `sh -n`, temas de color, requisitos, `TarExtractor`, PRoot, cierre suave, scripts gráficos XFCE4/LXDE, cliente RFB 3.8, sesiones, Wake/WifiLock, `setup-storage`, `PhantomProcessManager`, `TerminalSearch`, `SnippetManager`, `DebianDocumentsProvider`, `BackupManager` `.tar.gz`, Teclas Extra / Nerd Font TTF, `BootReceiver`, `SixelDecoder` y `TerminalEmulator` Sixel):
+La suite [VerifyAll.java](tests/VerifyAll.java) valida en JVM **26 pruebas clave** (`DECSET 2026`, modo Pan, redibujados sincronizados `>100 KB` y coalescencia de borrado, preservación de scroll `CSI 3 J` / 10,000 líneas, salida segura tras `exit` y sincronización de notificación Wake Lock, parser LXC/SHA-256, scripts `sh -n`, temas de color, requisitos, `TarExtractor`, PRoot, cierre suave, scripts gráficos XFCE4/LXDE, cliente RFB 3.8, sesiones, `setup-storage`, `PhantomProcessManager`, `TerminalSearch`, `SnippetManager`, `DebianDocumentsProvider`, `BackupManager` `.tar.gz`, Teclas Extra / Nerd Font TTF, `BootReceiver`, `SixelDecoder` y `TerminalEmulator` Sixel):
 
 ```bash
 javac -encoding UTF-8 -cp build/classes:/opt/android-sdk/android.jar:libs/xz-1.9.jar -d build/test-classes tests/VerifyAll.java

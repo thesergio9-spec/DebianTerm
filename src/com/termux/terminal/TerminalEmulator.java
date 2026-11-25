@@ -275,9 +275,22 @@ public final class TerminalEmulator {
      */
     private int mScrollCounter = 0;
 
-    /** Monotonic start timestamp (ns) of the active DECSET 2026 synchronized update, or 0. */
+    /** Monotonic start/last-data timestamps (ns) of the active DECSET 2026 synchronized update. */
     long mSyncOutputStartNs = 0L;
-    static final long SYNC_OUTPUT_MAX_HOLD_NS = 100_000_000L; // 100ms safety timeout
+    long mSyncOutputLastDataNs = 0L;
+    static final long SYNC_OUTPUT_MAX_HOLD_NS = 1_000_000_000L; // 1000ms absolute safety timeout
+    static final long SYNC_OUTPUT_IDLE_HOLD_NS = 250_000_000L;  // 250ms idle stall safety timeout
+
+    /** Short redraw settle window after destructive full-screen clears (CSI 2 J / 3 J / top-half 0 J). */
+    static final long ERASE_SETTLE_IDLE_NS = 16_000_000L;
+    static final long ERASE_SETTLE_MAX_NS = 64_000_000L;
+    private boolean mEraseSettleActive = false;
+    private long mEraseSettleStartNs = 0L;
+    private long mEraseSettleLastDataNs = 0L;
+
+    /** Preserves scrolled-up distance from bottom across CSI 3 J + full TUI conversation redraws. */
+    private boolean mHasPendingClearScrollRestore = false;
+    private double mSavedDistanceFromBottomBeforeClear = 0.0;
 
     /** True when viewport is pinned to bottom (`0`) and follows new output automatically. */
     private boolean mFollowOutput = true;
@@ -555,6 +568,15 @@ public final class TerminalEmulator {
     public void append(byte[] buffer, int length) {
         for (int i = 0; i < length; i++)
             processByte(buffer[i]);
+        if (length > 0) {
+            long now = System.nanoTime();
+            if (isDecsetInternalBitSet(DECSET_BIT_SYNCHRONIZED_OUTPUT)) {
+                mSyncOutputLastDataNs = now;
+            }
+            if (mEraseSettleActive) {
+                mEraseSettleLastDataNs = now;
+            }
+        }
     }
 
     private void processByte(byte byteToProcess) {
@@ -1480,11 +1502,17 @@ public final class TerminalEmulator {
                 break;
             case 2026:
                 if (setting) {
+                    long now = System.nanoTime();
                     if (mSyncOutputStartNs == 0L) {
-                        mSyncOutputStartNs = System.nanoTime();
+                        mSyncOutputStartNs = now;
                     }
+                    mSyncOutputLastDataNs = now;
                 } else {
                     mSyncOutputStartNs = 0L;
+                    mSyncOutputLastDataNs = 0L;
+                    mEraseSettleActive = false;
+                    mEraseSettleStartNs = 0L;
+                    mEraseSettleLastDataNs = 0L;
                 }
                 break;
             default:
@@ -1800,6 +1828,9 @@ public final class TerminalEmulator {
                 // ED ignores the scrolling margins.
                 switch (getArg0(0)) {
                     case 0: // Erase from the active position to the end of the screen, inclusive (default).
+                        if (mCursorRow <= mRows / 2) {
+                            markDestructiveErase();
+                        }
                         blockClear(mCursorCol, mCursorRow, mColumns - mCursorCol);
                         blockClear(0, mCursorRow + 1, mColumns, mRows - (mCursorRow + 1));
                         mScreen.clearSixelImagesInExternalRange(mCursorRow, mRows);
@@ -1811,14 +1842,26 @@ public final class TerminalEmulator {
                         break;
                     case 2: // Erase all of the display - all lines are erased, changed to single-width, and the cursor does not
                         // move..
+                        markDestructiveErase();
                         blockClear(0, 0, mColumns, mRows);
                         mScreen.clearSixelImagesInExternalRange(0, mRows);
                         break;
                     case 3: // Delete all lines saved in the scrollback buffer (xterm etc)
+                        markDestructiveErase();
+                        if (mScreen == mMainBuffer && !mFollowOutput && mMainBuffer.getActiveTranscriptRows() > 0) {
+                            double distFromBottom = (double) getMaxTopRow() - getViewportOffset();
+                            if (distFromBottom > 1.0) {
+                                mHasPendingClearScrollRestore = true;
+                                mSavedDistanceFromBottomBeforeClear = distFromBottom;
+                            }
+                        }
                         mMainBuffer.clearTranscript();
                         mScrollCounter = 0;
                         if (mScreen == mMainBuffer) {
-                            if (!mAutoScrollDisabled) {
+                            if (mHasPendingClearScrollRestore) {
+                                mFollowOutput = false;
+                                mAnchoredDocRow = mMainBuffer.getBaseAbsoluteRow();
+                            } else if (!mAutoScrollDisabled) {
                                 pinViewportToBottom();
                             } else {
                                 mAnchoredDocRow = mMainBuffer.getBaseAbsoluteRow() + getMaxTopRow();
@@ -2755,26 +2798,78 @@ public final class TerminalEmulator {
         mScrollCounter = 0;
     }
 
+    private void markDestructiveErase() {
+        long now = System.nanoTime();
+        if (!mEraseSettleActive || mEraseSettleStartNs == 0L) {
+            mEraseSettleStartNs = now;
+        }
+        mEraseSettleLastDataNs = now;
+        mEraseSettleActive = true;
+    }
+
+    /** Restores scrolled-up viewport distance after a settled CSI 3 J redraw if transcript rebuilt. */
+    public void resolvePendingClearScrollRestore() {
+        if (!mHasPendingClearScrollRestore || isSynchronizedOutputActive() || mEraseSettleActive) {
+            return;
+        }
+        mHasPendingClearScrollRestore = false;
+        if (mScreen != mMainBuffer) {
+            return;
+        }
+        int rebuiltHistory = mMainBuffer.getActiveTranscriptRows();
+        if (rebuiltHistory > 0) {
+            freezeViewportAtOffset((double) getMaxTopRow() - mSavedDistanceFromBottomBeforeClear);
+        } else if (!mAutoScrollDisabled) {
+            pinViewportToBottom();
+        }
+    }
+
     public boolean isSynchronizedOutputActive() {
-        return isDecsetInternalBitSet(DECSET_BIT_SYNCHRONIZED_OUTPUT)
-            && (mSyncOutputStartNs == 0L || (System.nanoTime() - mSyncOutputStartNs) < SYNC_OUTPUT_MAX_HOLD_NS);
+        if (!isDecsetInternalBitSet(DECSET_BIT_SYNCHRONIZED_OUTPUT)) return false;
+        long now = System.nanoTime();
+        boolean underMax = (mSyncOutputStartNs == 0L || (now - mSyncOutputStartNs) < SYNC_OUTPUT_MAX_HOLD_NS);
+        boolean underIdle = (mSyncOutputLastDataNs == 0L || (now - mSyncOutputLastDataNs) < SYNC_OUTPUT_IDLE_HOLD_NS);
+        return underMax && underIdle;
     }
 
     /**
-     * Returns > 0 milliseconds to defer UI redraw while a DECSET 2026 synchronized update is active
-     * (bounded by {@link #SYNC_OUTPUT_MAX_HOLD_NS}), or 0 when ready to render immediately.
+     * Returns > 0 milliseconds to defer UI redraw while a DECSET 2026 synchronized update
+     * or destructive full-screen erase settle window is active, or 0 when ready to render immediately.
      */
     public long getDeferredScreenUpdateDelayMs() {
-        if (!isDecsetInternalBitSet(DECSET_BIT_SYNCHRONIZED_OUTPUT)) return 0L;
-        long now = System.nanoTime();
-        if (mSyncOutputStartNs == 0L) mSyncOutputStartNs = now;
-        long remainingNs = (mSyncOutputStartNs + SYNC_OUTPUT_MAX_HOLD_NS) - now;
-        if (remainingNs <= 0L) {
-            setDecsetinternalBit(DECSET_BIT_SYNCHRONIZED_OUTPUT, false);
-            mSyncOutputStartNs = 0L;
-            return 0L;
+        if (isDecsetInternalBitSet(DECSET_BIT_SYNCHRONIZED_OUTPUT)) {
+            long now = System.nanoTime();
+            if (mSyncOutputStartNs == 0L) mSyncOutputStartNs = now;
+            if (mSyncOutputLastDataNs == 0L) mSyncOutputLastDataNs = now;
+            long deadline = Math.min(mSyncOutputStartNs + SYNC_OUTPUT_MAX_HOLD_NS, mSyncOutputLastDataNs + SYNC_OUTPUT_IDLE_HOLD_NS);
+            long remainingNs = deadline - now;
+            if (remainingNs <= 0L) {
+                setDecsetinternalBit(DECSET_BIT_SYNCHRONIZED_OUTPUT, false);
+                mSyncOutputStartNs = 0L;
+                mSyncOutputLastDataNs = 0L;
+                mEraseSettleActive = false;
+                mEraseSettleStartNs = 0L;
+                mEraseSettleLastDataNs = 0L;
+                resolvePendingClearScrollRestore();
+                return 0L;
+            }
+            return Math.max(1L, (remainingNs + 999_999L) / 1_000_000L);
         }
-        return Math.max(1L, (remainingNs + 999_999L) / 1_000_000L);
+        if (mEraseSettleActive) {
+            long now = System.nanoTime();
+            long deadline = Math.min(mEraseSettleStartNs + ERASE_SETTLE_MAX_NS, mEraseSettleLastDataNs + ERASE_SETTLE_IDLE_NS);
+            long remainingNs = deadline - now;
+            if (remainingNs <= 0L) {
+                mEraseSettleActive = false;
+                mEraseSettleStartNs = 0L;
+                mEraseSettleLastDataNs = 0L;
+                resolvePendingClearScrollRestore();
+                return 0L;
+            }
+            return Math.max(1L, (remainingNs + 999_999L) / 1_000_000L);
+        }
+        resolvePendingClearScrollRestore();
+        return 0L;
     }
 
     public void setVisualRows(int visualRows) {
@@ -2819,6 +2914,7 @@ public final class TerminalEmulator {
     }
 
     public void pinViewportToBottom() {
+        mHasPendingClearScrollRestore = false;
         mFollowOutput = true;
         mAnchoredDocRow = mMainBuffer.getBaseAbsoluteRow() + getMaxTopRow();
     }
@@ -2832,6 +2928,7 @@ public final class TerminalEmulator {
     }
 
     public void setViewportOffset(double externalRowOffset) {
+        mHasPendingClearScrollRestore = false;
         int maxTopRow = getMaxTopRow();
         if (externalRowOffset >= maxTopRow - 0.15 && !mAutoScrollDisabled) {
             pinViewportToBottom();
@@ -2871,6 +2968,11 @@ public final class TerminalEmulator {
         mEscapeState = ESC_NONE;
         mSixelDecoder = null;
         mSyncOutputStartNs = 0L;
+        mSyncOutputLastDataNs = 0L;
+        mEraseSettleActive = false;
+        mEraseSettleStartNs = 0L;
+        mEraseSettleLastDataNs = 0L;
+        mHasPendingClearScrollRestore = false;
         mInsertMode = false;
         mTopMargin = mLeftMargin = 0;
         mBottomMargin = mRows;

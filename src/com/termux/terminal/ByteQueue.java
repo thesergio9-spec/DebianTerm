@@ -17,6 +17,10 @@ final class ByteQueue {
         notify();
     }
 
+    public synchronized boolean hasData() {
+        return mStoredBytes > 0 && mOpen;
+    }
+
     public synchronized int read(byte[] buffer, boolean block) {
         while (mStoredBytes == 0 && mOpen) {
             if (block) {

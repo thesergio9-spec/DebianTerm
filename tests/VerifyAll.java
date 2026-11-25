@@ -154,7 +154,10 @@ public final class VerifyAll {
         testBootAutostartLogicAndManifest();
         testSixelDecoderCore();
         testTerminalEmulatorSixelIntegration();
-        System.out.println("ALL 23 VERIFICATION TESTS PASSED.");
+        testLargeSyncRedrawAndEraseSettleAntiRewind();
+        testScrolledUpPreservedAcrossCsi3jRedrawAndTranscriptCapacity();
+        testSafeAppExitOnLastShellExit();
+        System.out.println("ALL 26 VERIFICATION TESTS PASSED.");
     }
 
     private static void testDecset2026() {
@@ -763,6 +766,23 @@ public final class VerifyAll {
         String actionToggle = (String) DebianTermService.class.getField("ACTION_TOGGLE_WAKELOCK").get(null);
         check("com.debianchroot.term.ACTION_TOGGLE_WAKELOCK".equals(actionToggle),
             "Unexpected ACTION_TOGGLE_WAKELOCK: " + actionToggle);
+        String actionAcquire = (String) DebianTermService.class.getField("ACTION_ACQUIRE_WAKELOCK").get(null);
+        check("com.debianchroot.term.ACTION_ACQUIRE_WAKELOCK".equals(actionAcquire),
+            "Unexpected ACTION_ACQUIRE_WAKELOCK: " + actionAcquire);
+        String actionRelease = (String) DebianTermService.class.getField("ACTION_RELEASE_WAKELOCK").get(null);
+        check("com.debianchroot.term.ACTION_RELEASE_WAKELOCK".equals(actionRelease),
+            "Unexpected ACTION_RELEASE_WAKELOCK: " + actionRelease);
+
+        check("Wake: OFF".equals(DebianTermService.formatWakeNotificationLabel(false, false)),
+            "Unexpected notification label when Wake Lock OFF");
+        check("⚡ Wake: CPU".equals(DebianTermService.formatWakeNotificationLabel(true, false)),
+            "Unexpected notification label when CPU Wake Lock ON");
+        check("⚡ Wake: CPU+WiFi".equals(DebianTermService.formatWakeNotificationLabel(true, true)),
+            "Unexpected notification label when CPU+WiFi Wake Lock ON");
+        check("Activar Wake".equals(DebianTermService.formatWakeActionLabel(false)),
+            "Unexpected notification action label when OFF");
+        check("Soltar Wake".equals(DebianTermService.formatWakeActionLabel(true)),
+            "Unexpected notification action label when ON");
 
         check(Modifier.isPublic(DebianTermService.class.getMethod("isWakeLockHeld").getModifiers()),
             "isWakeLockHeld must be public");
@@ -1273,8 +1293,8 @@ public final class VerifyAll {
         }
 
         String manifest = new String(Files.readAllBytes(Paths.get("AndroidManifest.xml")), StandardCharsets.UTF_8);
-        check(manifest.contains("android:versionCode=\"10\"") && manifest.contains("android:versionName=\"2.4.1\""),
-            "AndroidManifest must bump versionCode=10 / versionName=2.4.1");
+        check(manifest.contains("android:versionCode=\"11\"") && manifest.contains("android:versionName=\"2.4.2\""),
+            "AndroidManifest must bump versionCode=11 / versionName=2.4.2");
         check(Files.exists(Paths.get("LICENSE"))
             && new String(Files.readAllBytes(Paths.get("LICENSE")), StandardCharsets.UTF_8)
                 .contains("GNU GENERAL PUBLIC LICENSE"),
@@ -1410,6 +1430,126 @@ public final class VerifyAll {
         check(em.getScreen().getSixelImages().isEmpty(), "ESC c (RIS) must clear all Sixel images");
 
         System.out.println("[PASS] Test 23: TerminalEmulator Sixel DCS, DA1/XTSMGRAPHICS & scrollback anchoring");
+    }
+
+    private static void testLargeSyncRedrawAndEraseSettleAntiRewind() throws Exception {
+        RecordingOutput out = new RecordingOutput();
+        TerminalEmulator em = new TerminalEmulator(out, 80, 42, 10, 20, 10000, new StubSessionClient());
+        em.setVisualRows(22);
+
+        StringBuilder payload = new StringBuilder(140_000);
+        for (int i = 1; i <= 2050; i++) {
+            payload.append("conversation-turn-").append(i)
+                .append(" [assistant] detailed reasoning payload to exceed 100KB frame size\r\n");
+        }
+        byte[] allBytes = payload.toString().getBytes(StandardCharsets.UTF_8);
+        check(allBytes.length > 100_000, "Payload must exceed 100KB, got " + allBytes.length);
+
+        feed(em, "\033[?2026h\033[2J\033[3J\033[H");
+        int offset = 0;
+        while (offset < allBytes.length) {
+            int len = Math.min(16_384, allBytes.length - offset);
+            em.append(Arrays.copyOfRange(allBytes, offset, offset + len), len);
+            offset += len;
+            check(em.getDeferredScreenUpdateDelayMs() > 0L,
+                "DECSET 2026 must remain deferred across large >100KB chunks");
+        }
+
+        feed(em, "\033[?2026l");
+        check(em.getDeferredScreenUpdateDelayMs() == 0L,
+            "CSI ? 2026 l must release frame defer immediately");
+        check(em.isFollowingOutput() && em.getMaxTopRow() > 0,
+            "Large redraw must keep bottom pan follow (maxTopRow=" + em.getMaxTopRow() + ")");
+        String visibleTail = em.getScreen().getSelectedText(0, em.getMaxTopRow(), 79, em.getMaxTopRow() + 21);
+        check(visibleTail.contains("conversation-turn-2050"),
+            "Viewport must stay at latest line 2050 without rewinding");
+
+        // Now verify destructive erase without DECSET 2026 coalesces for <= 64 ms then settles
+        feed(em, "\033[2J\033[H");
+        long eraseDefer = em.getDeferredScreenUpdateDelayMs();
+        check(eraseDefer > 0L && eraseDefer <= 64L,
+            "Non-2026 CSI 2 J must activate erase-settle defer (1..64ms), got " + eraseDefer);
+        feed(em, "redrawn-prompt> ");
+        Thread.sleep(25L);
+        check(em.getDeferredScreenUpdateDelayMs() == 0L,
+            "Erase-settle must expire after >16ms idle");
+
+        System.out.println("[PASS] Test 24: Large >100KB DECSET 2026 coalesce & erase-settle anti-rewind");
+    }
+
+    private static void testScrolledUpPreservedAcrossCsi3jRedrawAndTranscriptCapacity() throws Exception {
+        RecordingOutput out = new RecordingOutput();
+        TerminalEmulator em = new TerminalEmulator(out, 80, 40, 10, 20, 10000, new StubSessionClient());
+
+        StringBuilder conv = new StringBuilder();
+        for (int i = 1; i <= 1500; i++) {
+            conv.append("msg-line-").append(i).append("\r\n");
+        }
+        feed(em, conv.toString());
+
+        int initialMaxTop = em.getMaxTopRow();
+        double scrolledOffset = initialMaxTop - 200.0;
+        em.setViewportOffset(scrolledOffset);
+        check(!em.isFollowingOutput(), "User scrolled up 200 rows must unpin followOutput");
+
+        // TUI runs full synchronized redraw including CSI 3 J (clear scrollback) + re-prints 1500 lines
+        feed(em, "\033[?2026h\033[2J\033[3J\033[H");
+        feed(em, conv.toString());
+        feed(em, "\033[?2026l");
+        check(em.getDeferredScreenUpdateDelayMs() == 0L, "Sync frame should settle cleanly");
+        check(!em.isFollowingOutput(), "Scrolled-up user must NOT be yanked to bottom after CSI 3 J conversation redraw");
+        double distAfterRedraw = em.getMaxTopRow() - em.getViewportOffset();
+        check(Math.abs(distAfterRedraw - 200.0) <= 2.0,
+            "Scrolled-up distance from bottom must stay ~200 rows, got " + distAfterRedraw);
+
+        // Real bash clear while scrolled up leaves 0 transcript rows -> settles to bottom cleanly
+        em.setViewportOffset(em.getMaxTopRow() - 100.0);
+        feed(em, "\033[H\033[2J\033[3Juser@debian:~$ ");
+        Thread.sleep(25L);
+        check(em.getDeferredScreenUpdateDelayMs() == 0L, "Real clear settle should complete");
+        check(em.isFollowingOutput() && em.getTopRow() == 0,
+            "Real bash clear with 0 transcript lines must reset to follow at row 0");
+
+        java.lang.reflect.Field f = DebianTermService.class.getDeclaredField("DEFAULT_TRANSCRIPT_ROWS");
+        f.setAccessible(true);
+        int transcriptRows = f.getInt(null);
+        check(transcriptRows >= 10000, "DebianTermService.DEFAULT_TRANSCRIPT_ROWS must be >= 10000, got " + transcriptRows);
+
+        System.out.println("[PASS] Test 25: CSI 3 J scrollback preservation across redraw & 10,000-row transcript");
+    }
+
+    private static void testSafeAppExitOnLastShellExit() throws Exception {
+        check(DebianTermService.isInteractiveShellKind(DebianTermService.SessionKind.DEBIAN_ROOT),
+            "DEBIAN_ROOT must be interactive shell kind");
+        check(DebianTermService.isInteractiveShellKind(DebianTermService.SessionKind.DEBIAN_PROOT),
+            "DEBIAN_PROOT must be interactive shell kind");
+        check(DebianTermService.isInteractiveShellKind(DebianTermService.SessionKind.ANDROID_ROOT),
+            "ANDROID_ROOT must be interactive shell kind");
+        check(DebianTermService.isInteractiveShellKind(DebianTermService.SessionKind.ANDROID_SHELL),
+            "ANDROID_SHELL must be interactive shell kind");
+
+        check(!DebianTermService.isInteractiveShellKind(DebianTermService.SessionKind.COMMAND),
+            "COMMAND must not trigger full-app auto-exit");
+        check(!DebianTermService.isInteractiveShellKind(DebianTermService.SessionKind.DESKTOP_VNC),
+            "DESKTOP_VNC must not trigger full-app auto-exit");
+        check(!DebianTermService.isInteractiveShellKind(DebianTermService.SessionKind.DESKTOP_X11),
+            "DESKTOP_X11 must not trigger full-app auto-exit");
+        check(!DebianTermService.isInteractiveShellKind(null),
+            "null session kind must return false");
+
+        check(DebianTermService.shouldExitAppAfterSessionClosed(DebianTermService.SessionKind.DEBIAN_ROOT, 0),
+            "Last DEBIAN_ROOT shell exit must exit app");
+        check(DebianTermService.shouldExitAppAfterSessionClosed(DebianTermService.SessionKind.DEBIAN_PROOT, 0),
+            "Last DEBIAN_PROOT shell exit must exit app");
+        check(!DebianTermService.shouldExitAppAfterSessionClosed(DebianTermService.SessionKind.DEBIAN_ROOT, 1),
+            "Non-last shell exit must stay in app");
+        check(!DebianTermService.shouldExitAppAfterSessionClosed(DebianTermService.SessionKind.COMMAND, 0),
+            "COMMAND completion must return to dashboard, not exit app");
+
+        Method getKind = DebianTermService.class.getMethod("getSessionKind", TerminalSession.class);
+        check(Modifier.isPublic(getKind.getModifiers()), "DebianTermService.getSessionKind must be public");
+
+        System.out.println("[PASS] Test 26: Safe full-app exit policy on last interactive shell exit");
     }
 
     private static String fetchText(String urlStr) throws Exception {

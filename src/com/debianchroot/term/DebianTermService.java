@@ -39,9 +39,11 @@ public final class DebianTermService extends Service {
 
     public static final String ACTION_STOP_ALL = "com.debianchroot.term.ACTION_STOP_ALL";
     public static final String ACTION_TOGGLE_WAKELOCK = "com.debianchroot.term.ACTION_TOGGLE_WAKELOCK";
+    public static final String ACTION_ACQUIRE_WAKELOCK = "com.debianchroot.term.ACTION_ACQUIRE_WAKELOCK";
+    public static final String ACTION_RELEASE_WAKELOCK = "com.debianchroot.term.ACTION_RELEASE_WAKELOCK";
     public static final String ACTION_RUN_BOOT_TASKS = "com.debianchroot.term.ACTION_RUN_BOOT_TASKS";
 
-    private static final int DEFAULT_TRANSCRIPT_ROWS = 4000;
+    private static final int DEFAULT_TRANSCRIPT_ROWS = 10000;
     private static final long GRACEFUL_EXIT_TIMEOUT_MS = 1500L;
 
     public enum SessionKind {
@@ -144,9 +146,17 @@ public final class DebianTermService extends Service {
                 }
                 stopAllSessionsAndSelf();
                 return START_NOT_STICKY;
+            } else if (ACTION_ACQUIRE_WAKELOCK.equals(action)) {
+                if (!mSessions.isEmpty()) {
+                    setWakeLockEnabled(true, false);
+                }
+            } else if (ACTION_RELEASE_WAKELOCK.equals(action)) {
+                if (!mSessions.isEmpty()) {
+                    setWakeLockEnabled(false, false);
+                }
             } else if (ACTION_TOGGLE_WAKELOCK.equals(action)) {
                 if (!mSessions.isEmpty()) {
-                    toggleWakeLock();
+                    setWakeLockEnabled(!isWakeLockHeld(), false);
                 }
             } else if (ACTION_RUN_BOOT_TASKS.equals(action)) {
                 if (!mIsForeground) {
@@ -163,9 +173,11 @@ public final class DebianTermService extends Service {
                 mIsForeground = true;
             }
             stopForegroundAndSelfIfEmpty();
-        } else {
+        } else if (!mIsForeground) {
             startForeground(NOTIFICATION_ID, buildNotification());
             mIsForeground = true;
+        } else {
+            updateNotification();
         }
         return START_NOT_STICKY;
     }
@@ -230,6 +242,21 @@ public final class DebianTermService extends Service {
             }
         }
         return null;
+    }
+
+    public SessionKind getSessionKind(TerminalSession session) {
+        return session != null ? mSessionKinds.get(session) : null;
+    }
+
+    public static boolean isInteractiveShellKind(SessionKind kind) {
+        return kind == SessionKind.DEBIAN_ROOT
+            || kind == SessionKind.DEBIAN_PROOT
+            || kind == SessionKind.ANDROID_ROOT
+            || kind == SessionKind.ANDROID_SHELL;
+    }
+
+    public static boolean shouldExitAppAfterSessionClosed(SessionKind closedKind, int remainingSessionsCount) {
+        return remainingSessionsCount <= 0 && isInteractiveShellKind(closedKind);
     }
 
     public int pruneCleanlyFinishedSessions() {
@@ -576,17 +603,23 @@ public final class DebianTermService extends Service {
     }
 
     public void setWakeLockEnabled(boolean enabled) {
+        setWakeLockEnabled(enabled, true);
+    }
+
+    private void setWakeLockEnabled(boolean enabled, boolean postNotification) {
         if (enabled) {
             acquireWakeLock();
         } else {
             releaseWakeLock();
         }
-        updateNotification();
+        if (postNotification) {
+            updateNotification();
+        }
         notifyWakeLockChanged();
     }
 
     public void toggleWakeLock() {
-        setWakeLockEnabled(!isWakeLockHeld());
+        setWakeLockEnabled(!isWakeLockHeld(), true);
     }
 
     @SuppressWarnings("deprecation")
@@ -710,8 +743,19 @@ public final class DebianTermService extends Service {
         }
     }
 
+    public static String formatWakeNotificationLabel(boolean wakeHeld, boolean wifiHeld) {
+        if (wakeHeld) {
+            return wifiHeld ? "⚡ Wake: CPU+WiFi" : "⚡ Wake: CPU";
+        }
+        return "Wake: OFF";
+    }
+
+    public static String formatWakeActionLabel(boolean wakeHeld) {
+        return wakeHeld ? "Soltar Wake" : "Activar Wake";
+    }
+
     private PendingIntent createServiceActionPendingIntent(int requestCode, Intent intent, int flags) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !mIsForeground) {
             return PendingIntent.getForegroundService(this, requestCode, intent, flags);
         }
         return PendingIntent.getService(this, requestCode, intent, flags);
@@ -728,9 +772,12 @@ public final class DebianTermService extends Service {
         exitIntent.setAction(ACTION_STOP_ALL);
         PendingIntent exitPi = createServiceActionPendingIntent(1, exitIntent, flags);
 
+        boolean wakeHeld = isWakeLockHeld();
+        boolean wifiHeld = isWifiLockHeld();
+
         Intent wakeIntent = new Intent(this, DebianTermService.class);
-        wakeIntent.setAction(ACTION_TOGGLE_WAKELOCK);
-        PendingIntent wakePi = createServiceActionPendingIntent(2, wakeIntent, flags);
+        wakeIntent.setAction(wakeHeld ? ACTION_RELEASE_WAKELOCK : ACTION_ACQUIRE_WAKELOCK);
+        PendingIntent wakePi = createServiceActionPendingIntent(wakeHeld ? 3 : 2, wakeIntent, flags);
 
         int running = getRunningSessionCount();
         int total = mSessions.size();
@@ -742,9 +789,7 @@ public final class DebianTermService extends Service {
         } else {
             text = "Sin sesiones activas";
         }
-        if (isWakeLockHeld()) {
-            text += isWifiLockHeld() ? " • Wake+WiFi ON" : " • Wake Lock ON";
-        }
+        text += " • " + formatWakeNotificationLabel(wakeHeld, wifiHeld);
 
         Notification.Builder builder = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
             ? new Notification.Builder(this, CHANNEL_ID)
@@ -756,9 +801,18 @@ public final class DebianTermService extends Service {
             .setContentText(text)
             .setContentIntent(contentPi)
             .setOngoing(true)
+            .setOnlyAlertOnce(true)
             .setShowWhen(false)
-            .addAction(0, isWakeLockHeld() ? "Soltar Wake" : getString(R.string.action_wake_lock), wakePi)
-            .addAction(0, getString(R.string.action_exit), exitPi);
+            .addAction(new Notification.Action.Builder(
+                (android.graphics.drawable.Icon) null,
+                formatWakeActionLabel(wakeHeld),
+                wakePi
+            ).build())
+            .addAction(new Notification.Action.Builder(
+                (android.graphics.drawable.Icon) null,
+                getString(R.string.action_exit),
+                exitPi
+            ).build());
 
         return builder.build();
     }

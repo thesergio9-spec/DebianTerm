@@ -80,6 +80,7 @@ public final class TerminalView extends View {
     private int mUnobscuredRootWidth;
     private int mUnobscuredRootHeight;
     private int mUnobscuredViewHeight;
+    private boolean mHasMeasuredUnobscuredHeight;
     private int mLayoutRows;
     private int mVisibleRows;
     int[] mDefaultSelectors = new int[]{-1,-1,-1,-1};
@@ -339,6 +340,7 @@ public final class TerminalView extends View {
         if (mSoftKeyboardPansMainScreen != enabled) {
             mSoftKeyboardPansMainScreen = enabled;
             mUnobscuredViewHeight = 0;
+            mHasMeasuredUnobscuredHeight = false;
             updateSize();
         }
     }
@@ -601,6 +603,7 @@ public final class TerminalView extends View {
             }
         }
         mEmulator.clearScrollCounter();
+        mEmulator.resolvePendingClearScrollRestore();
 
         syncViewportFromEmulator();
 
@@ -1133,6 +1136,7 @@ public final class TerminalView extends View {
     /** Notify that surrounding non-IME chrome (e.g. extra-keys toolbar) changed height/visibility. */
     public void onToolbarGeometryChanged() {
         mUnobscuredViewHeight = 0;
+        mHasMeasuredUnobscuredHeight = false;
     }
 
     private int resolveLayoutHeight(int viewWidth, int viewHeight) {
@@ -1146,6 +1150,7 @@ public final class TerminalView extends View {
             }
             if (ctx instanceof Activity && ((Activity) ctx).isInMultiWindowMode()) {
                 mUnobscuredViewHeight = 0;
+                mHasMeasuredUnobscuredHeight = false;
                 return viewHeight;
             }
         }
@@ -1189,11 +1194,30 @@ public final class TerminalView extends View {
             imeActive = true;
         }
 
-        boolean sameWindowGeometry = (rootW == mUnobscuredRootWidth && rootH == mUnobscuredRootHeight);
+        int heightTolerance = Math.max(24, mRenderer != null ? mRenderer.mFontLineSpacing : 24);
+        boolean sameWindowGeometry = (mUnobscuredRootWidth > 0 && rootW == mUnobscuredRootWidth
+            && Math.abs(rootH - mUnobscuredRootHeight) <= heightTolerance);
         if (!imeActive) {
+            if (sameWindowGeometry && mUnobscuredViewHeight > 0) {
+                if (mHasMeasuredUnobscuredHeight) {
+                    if (viewHeight > mUnobscuredViewHeight) {
+                        mUnobscuredViewHeight = viewHeight;
+                        mUnobscuredRootHeight = rootH;
+                    }
+                    return mUnobscuredViewHeight;
+                }
+                if (rootH <= 0 || viewHeight >= (rootH * 55) / 100) {
+                    mUnobscuredViewHeight = viewHeight;
+                    mUnobscuredRootHeight = rootH;
+                    mHasMeasuredUnobscuredHeight = true;
+                    return mUnobscuredViewHeight;
+                }
+                return Math.max(mUnobscuredViewHeight, viewHeight);
+            }
             mUnobscuredRootWidth = rootW;
             mUnobscuredRootHeight = rootH;
             mUnobscuredViewHeight = viewHeight;
+            mHasMeasuredUnobscuredHeight = true;
             return viewHeight;
         }
 
@@ -1208,6 +1232,7 @@ public final class TerminalView extends View {
         mUnobscuredRootWidth = rootW;
         mUnobscuredRootHeight = rootH;
         mUnobscuredViewHeight = Math.max(viewHeight, estimated);
+        mHasMeasuredUnobscuredHeight = false;
         return mUnobscuredViewHeight;
     }
 

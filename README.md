@@ -5,8 +5,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/thesergio9-spec/DebianTerm/releases/tag/v2.4.1">
-    <img src="https://img.shields.io/badge/release-v2.4.1-D70A53?style=flat-square" alt="Release v2.4.1">
+  <a href="https://github.com/thesergio9-spec/DebianTerm/releases/tag/v2.4.2">
+    <img src="https://img.shields.io/badge/release-v2.4.2-D70A53?style=flat-square" alt="Release v2.4.2">
   </a>
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/license-GPLv3-blue?style=flat-square" alt="License GPLv3">
@@ -17,7 +17,7 @@
   </a>
 </p>
 
-**DebianTerm** (`v2.4.1`) is a complete **Debian 12 (Bookworm) installer, terminal emulator, and hybrid graphical desktop** for Android built around Termux's terminal engine (`terminal-emulator` and `terminal-view`). It launches with an **automatic device requirements check**, a **Terminal (CLI) vs. Graphical Desktop** selector, and **two independent execution paths**:
+**DebianTerm** (`v2.4.2`) is a complete **Debian 12 (Bookworm) installer, terminal emulator, and hybrid graphical desktop** for Android built around Termux's terminal engine (`terminal-emulator` and `terminal-view`). It launches with an **automatic device requirements check**, a **Terminal (CLI) vs. Graphical Desktop** selector, and **two independent execution paths**:
 
 1. **Path 1 — Rooted (Native Chroot):** native Linux kernel performance and real mounts for Magisk, KernelSU, or APatch devices.
 2. **Path 2 — Rootless (Bundled PRoot):** embedded `PRoot` binaries (`arm64-v8a` and `armeabi-v7a`) packaged directly inside the APK — **100% standalone, no Termux app required**.
@@ -45,7 +45,7 @@ DebianTerm runs under its own application ID (`com.debianchroot.term`), safely c
 
 Grab the latest signed release APK directly from GitHub Releases:
 
-- **[DebianTerm.apk (v2.4.1)](https://github.com/thesergio9-spec/DebianTerm/releases/download/v2.4.1/DebianTerm.apk)**
+- **[DebianTerm.apk (v2.4.2)](https://github.com/thesergio9-spec/DebianTerm/releases/download/v2.4.2/DebianTerm.apk)**
 
 ---
 
@@ -60,7 +60,7 @@ DebianTerm is open source, ad-free, and contains zero analytics or telemetry:
 
 ---
 
-## 🚀 Key Features (`v2.4.1`)
+## 🚀 Key Features (`v2.4.2`)
 
 ### 1. Startup Requirements & Mode Selector Dashboard
 On startup, `SystemRequirements` evaluates device readiness before installing or launching Debian:
@@ -79,11 +79,12 @@ Choose **Terminal (CLI)** or **Graphical Mode** before launching Debian:
 - **Path 1 — Rooted Native Chroot:** detects existing `/data/local/debian` (or custom path) safely; generates an isolated `/data/local/bin/debian` entry script (`env -i`, `timeout 5 mount`, `/dev/chroot_sessions` reference counting with automatic unmount when the last tab closes); supports `status`, `stop`/`umount`, `exec`.
 - **Path 2 — Rootless Bundled PRoot:** bundles `libproot.so`, `libproot_loader.so`, and `libproot_loader32.so`; pure-Java `TarExtractor` (`USTAR`, `PAX`, `GNU LongName`, safe symlink/hardlink handling, `/dev/*` skip, path-traversal protection); preconfigures DNS (`1.1.1.1`, `8.8.8.8`), `aid_inet`, APT sandbox rules, auto-`PROOT_NO_SECCOMP` fallback, `/proc/*` bindings, and `setup-storage`.
 
-### 4. Simplified Drawer, Terminal Engine & Productivity
-- **Simplified 3-Row Navigation Drawer (New in `v2.4.1`):** collapses the action buttons into 3 compact bottom rows (**`+ Nueva sesión`** chooser -> Root / PRoot / Android shell; **`Wake`** + **`Herramientas`** -> Snippets / `setup-storage` / SAF / Backups / Boot Autostart; **`Inicio` / `Ajustes` / `Acerca`**) so active terminal sessions get clean vertical breathing room.
-- **No-Rewind Soft Keyboard Pan Mode + `DECSET 2026`:** keeps PTY row counts stable when opening Android's soft keyboard and supports synchronized output (`CSI ? 2026 h/l` + `DECRQM`).
+### 4. Simplified Drawer, Anti-Rewind Engine & Productivity
+- **Simplified 3-Row Navigation Drawer:** collapses actions into 3 compact bottom rows (**`+ Nueva sesión`** chooser -> Root / PRoot / Android shell; **`Wake`** + **`Herramientas`** -> Snippets / `setup-storage` / SAF / Backups / Boot Autostart; **`Inicio` / `Ajustes` / `Acerca`**) so active terminal sessions get clean vertical breathing room.
+- **Long-Conversation Anti-Rewind Engine (`v2.4.2`):** 128 KB PTY queue with 512 KB/12 ms burst drain, `DECSET 2026` synchronized redraws held up to 1000 ms (250 ms idle guard), 16–64 ms destructive-erase settle coalescing (`CSI 2 J` / `3 J`), scrolled-up distance preservation across `CSI 3 J` TUI redraws, and hysteresis against transient IME/toolbar (`🔍` / `📝`) `SIGWINCH` resizes.
+- **Safe Full-App Exit & Synced Wake Lock Controls (`v2.4.2`):** running `exit` closes only that tab when multiple sessions are open, or safely releases Wake/WifiLock, stops `DebianTermService`, and removes the task when exiting the last interactive shell; notification shade controls (`Activar Wake` / `Soltar Wake`) stay synced in real time with the in-app drawer and title bar.
 - **Inline Sixel Graphics (`SixelDecoder` / `SixelImage`):** native DEC VT340/XTerm Sixel rendering (`img2sixel`, `chafa`, `lsix`, `gnuplot`) with DA1 (`;4;`) & `XTSMGRAPHICS` reporting (`256` color registers), scrollback anchoring, and a built-in demo trigger in Quick Settings.
-- **4,000-Line Scrollback Search (`TerminalSearch`):** case-sensitive toggle, `▲`/`▼` navigation, scrollback-anchored highlights, and quick line copy.
+- **10,000-Line Scrollback Search (`TerminalSearch`):** expanded 10,000-row transcript buffer with case-sensitive toggle, `▲`/`▼` navigation, scrollback-anchored highlights, and quick line copy.
 - **Snippets (`SnippetManager`) & Gboard/Voice Input Dock:** quick-command drawer plus a swipeable bottom text bar for autocorrect, swipe typing, and voice dictation.
 - **Phantom Process Killer (`PhantomProcessManager`):** detects Android 12–15 `signal 9` risk and provides 1-tap root fix or exact ADB mitigation commands.
 - **Storage Access Framework (`DebianDocumentsProvider`):** browse and edit rootless `/root` directly from Android file managers and editors (Material Files, Acode, QuickEdit) with path-traversal and external-symlink guards.
@@ -128,7 +129,7 @@ DebianTerm/
 │   └── com/termux/view/             # Terminal renderer with inline Sixel support
 ├── libs/                            # JAR dependencies (annotation-1.5.0, xz-1.9)
 ├── jniLibs/                         # arm64-v8a & armeabi-v7a (libtermux.so, PRoot binaries)
-├── tests/                           # 23 pure-JVM verification tests (VerifyAll.java)
+├── tests/                           # 26 pure-JVM verification tests (VerifyAll.java)
 ├── setup-deps.sh                    # Fetches Termux engine, JARs & SHA-256 verified PRoot binaries
 └── build.sh                         # Compiles, links, aligns & signs APK (aapt2, d8, apksigner)
 ```
@@ -155,7 +156,7 @@ The signed APK is output at `build/DebianTerm-release.apk`.
 
 ## 🧪 Unit Tests
 
-[tests/VerifyAll.java](tests/VerifyAll.java) runs **23 standalone JVM tests** covering `DECSET 2026`, anti-rewind Pan mode, live LXC image parsing, root script `sh -n` validation, color schemes, system requirements checks, `TarExtractor` PAX/symlinks/traversal safety, PRoot launcher validation, graceful shutdown, desktop scripts, simulated RFB 3.8 VNC server round-trips, session numbering reuse, Wake/WifiLock, `setup-storage`, `PhantomProcessManager`, `TerminalSearch`, `SnippetManager`, `DebianDocumentsProvider` path safety, `BackupManager` `.tar.gz` round-trips, `ExtraKeysBarView`/Nerd Font TTF validation, `BootReceiver`, `SixelDecoder`, and `TerminalEmulator` Sixel rendering:
+[tests/VerifyAll.java](tests/VerifyAll.java) runs **26 standalone JVM tests** covering `DECSET 2026`, anti-rewind Pan mode, large >100 KB sync redraw & erase-settle coalescing, `CSI 3 J` scrollback preservation (10,000-row transcript), safe last-shell app exit & Wake Lock notification sync, live LXC image parsing, root script `sh -n` validation, color schemes, system requirements checks, `TarExtractor` PAX/symlinks/traversal safety, PRoot launcher validation, graceful shutdown, desktop scripts, simulated RFB 3.8 VNC server round-trips, session numbering reuse, `setup-storage`, `PhantomProcessManager`, `TerminalSearch`, `SnippetManager`, `DebianDocumentsProvider` path safety, `BackupManager` `.tar.gz` round-trips, `ExtraKeysBarView`/Nerd Font TTF validation, `BootReceiver`, `SixelDecoder`, and `TerminalEmulator` Sixel rendering:
 
 ```bash
 javac -encoding UTF-8 -cp build/classes:/opt/android-sdk/android.jar:libs/xz-1.9.jar -d build/test-classes tests/VerifyAll.java

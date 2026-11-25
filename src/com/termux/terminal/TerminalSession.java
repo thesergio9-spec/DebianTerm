@@ -42,7 +42,7 @@ public final class TerminalSession extends TerminalOutput {
      * A queue written to from a separate thread when the process outputs, and read by main thread to process by
      * terminal emulator.
      */
-    final ByteQueue mProcessToTerminalIOQueue = new ByteQueue(4096);
+    final ByteQueue mProcessToTerminalIOQueue = new ByteQueue(128 * 1024);
     /**
      * A queue written to from the main thread due to user interaction, and read by another thread which forwards by
      * writing to the {@link #mTerminalFileDescriptor}.
@@ -134,7 +134,7 @@ public final class TerminalSession extends TerminalOutput {
             @Override
             public void run() {
                 try (InputStream termIn = new FileInputStream(terminalFileDescriptorWrapped)) {
-                    final byte[] buffer = new byte[4096];
+                    final byte[] buffer = new byte[16 * 1024];
                     while (true) {
                         int read = termIn.read(buffer);
                         if (read == -1) return;
@@ -389,20 +389,36 @@ public final class TerminalSession extends TerminalOutput {
     @SuppressLint("HandlerLeak")
     class MainThreadHandler extends Handler {
 
-        final byte[] mReceiveBuffer = new byte[4 * 1024];
+        private static final int MAX_BYTES_PER_DISPATCH = 512 * 1024;
+        private static final long MAX_DISPATCH_NS = 12_000_000L;
+
+        final byte[] mReceiveBuffer = new byte[32 * 1024];
 
         @Override
         public void handleMessage(Message msg) {
-            int bytesRead = mProcessToTerminalIOQueue.read(mReceiveBuffer, false);
-            if (bytesRead > 0) {
-                mEmulator.append(mReceiveBuffer, bytesRead);
+            if (msg.what == MSG_NEW_INPUT) {
+                removeMessages(MSG_NEW_INPUT);
             }
-            if (bytesRead > 0 || msg.what == MSG_DEFERRED_SCREEN_UPDATE) {
+            int totalRead = 0;
+            long startNs = System.nanoTime();
+            while (true) {
+                int bytesRead = mProcessToTerminalIOQueue.read(mReceiveBuffer, false);
+                if (bytesRead <= 0) break;
+                mEmulator.append(mReceiveBuffer, bytesRead);
+                totalRead += bytesRead;
+                if (totalRead >= MAX_BYTES_PER_DISPATCH || (System.nanoTime() - startNs) >= MAX_DISPATCH_NS) {
+                    break;
+                }
+            }
+            if (mProcessToTerminalIOQueue.hasData()) {
+                sendEmptyMessage(MSG_NEW_INPUT);
+            }
+            if (totalRead > 0 || msg.what == MSG_DEFERRED_SCREEN_UPDATE) {
                 long deferMs = mEmulator.getDeferredScreenUpdateDelayMs();
+                removeMessages(MSG_DEFERRED_SCREEN_UPDATE);
                 if (deferMs <= 0L) {
-                    removeMessages(MSG_DEFERRED_SCREEN_UPDATE);
                     notifyScreenUpdate();
-                } else if (!hasMessages(MSG_DEFERRED_SCREEN_UPDATE)) {
+                } else {
                     sendEmptyMessageDelayed(MSG_DEFERRED_SCREEN_UPDATE, deferMs);
                 }
             }

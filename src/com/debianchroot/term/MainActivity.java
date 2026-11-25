@@ -134,6 +134,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
     private LinearLayout mTextInputBar;
     private EditText mTextInputEdit;
     private boolean mTextInputMode = false;
+    private int mLastExtraRowHeightPx = 0;
 
     // Integrated VNC Desktop controls
     private VncCanvasView mVncCanvas;
@@ -192,6 +193,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
     private SystemRequirements.Report mLastReport = new SystemRequirements.Report(Collections.emptyList());
     private String mPendingContextUrl = null;
     private int mActiveAccentColor = Color.parseColor("#D70A53");
+    private boolean mExitingApp = false;
 
     private final ServiceConnection mServiceConnection = new ServiceConnection() {
         @Override
@@ -203,7 +205,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
             mService.setEventListener(new DebianTermService.ServiceEventListener() {
                 @Override
                 public void onServiceStopAllRequested() {
-                    runOnUiThread(MainActivity.this::finish);
+                    runOnUiThread(() -> exitAppSafely(false));
                 }
 
                 @Override
@@ -319,6 +321,20 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         if (mTerminalView != null && isTerminalVisible()) {
             mTerminalView.setTerminalCursorBlinkerRate(500);
             mTerminalView.setTerminalCursorBlinkerState(true, true);
+        }
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        updateWakeLockUi();
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) {
+            updateWakeLockUi();
         }
     }
 
@@ -2089,14 +2105,25 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
     }
 
     private void closeSession(TerminalSession session) {
+        closeSession(session, false);
+    }
+
+    private void closeSession(TerminalSession session, boolean exitAppIfLast) {
         if (mService == null || session == null) return;
+        DebianTermService.SessionKind closedKind = mService.getSessionKind(session);
         if (session == mActiveDesktopSession) {
             disconnectRfbClient();
             mActiveDesktopSession = null;
         }
         boolean wasCurrent = (session == mCurrentSession);
         mService.removeSession(session);
+        mService.pruneCleanlyFinishedSessions();
         List<TerminalSession> remaining = mService.getSessions();
+        if (exitAppIfLast && isTerminalVisible()
+            && DebianTermService.shouldExitAppAfterSessionClosed(closedKind, remaining.size())) {
+            exitAppSafely(true);
+            return;
+        }
         if (wasCurrent) {
             if (!remaining.isEmpty()) {
                 switchToSession(remaining.get(remaining.size() - 1));
@@ -2108,6 +2135,38 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         }
         refreshDrawerSessions();
         updatePathButtonsForMode();
+    }
+
+    private void exitAppSafely(boolean stopService) {
+        if (mExitingApp) return;
+        mExitingApp = true;
+        hideSoftKeyboard();
+        disconnectRfbClient();
+        mActiveDesktopSession = null;
+        mCurrentSession = null;
+        if (mTerminalView != null) {
+            mTerminalView.setTerminalCursorBlinkerState(false, true);
+        }
+        if (mService != null) {
+            mService.setClientVisible(false);
+            mService.setEventListener(null);
+            if (stopService) {
+                mService.stopAllSessionsAndSelf();
+            }
+        }
+        if (mBound) {
+            try {
+                unbindService(mServiceConnection);
+            } catch (IllegalArgumentException ignored) {
+            }
+            mBound = false;
+            mService = null;
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            finishAndRemoveTask();
+        } else {
+            finish();
+        }
     }
 
     private void promptRenameSession(final TerminalSession session) {
@@ -3246,8 +3305,8 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         autoWakeSwitch.setChecked(mSettings.isAutoWakeLockEnabled());
         autoWakeSwitch.setOnCheckedChangeListener((buttonView, isChecked) -> {
             mSettings.setAutoWakeLockEnabled(isChecked);
-            if (isChecked && mService != null && !mService.getSessions().isEmpty()) {
-                mService.setWakeLockEnabled(true);
+            if (mService != null && !mService.getSessions().isEmpty()) {
+                mService.setWakeLockEnabled(isChecked);
                 updateWakeLockUi();
             }
         });
@@ -3534,7 +3593,6 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         if (mSearchBar == null) return;
         mSearchBar.setVisibility(View.VISIBLE);
         if (mTerminalView != null) {
-            mTerminalView.onToolbarGeometryChanged();
             mTerminalView.post(() -> mTerminalView.updateSize());
         }
         if (mSearchInput != null) {
@@ -3559,7 +3617,6 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         }
         if (mTerminalView != null) {
             mTerminalView.clearSearchHighlight();
-            mTerminalView.onToolbarGeometryChanged();
             mTerminalView.post(() -> mTerminalView.updateSize());
             mTerminalView.requestFocus();
         }
@@ -3670,14 +3727,19 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
     private void setTextInputMode(boolean enabled) {
         mTextInputMode = enabled;
         boolean hidden = TerminalSettings.EXTRA_KEYS_HIDDEN.equals(mSettings.getExtraKeysMode());
+        if (enabled && mBottomExtraRow != null && mBottomExtraRow.getHeight() > 0) {
+            mLastExtraRowHeightPx = mBottomExtraRow.getHeight();
+        }
         if (mBottomExtraRow != null) {
             mBottomExtraRow.setVisibility((!enabled && !hidden) ? View.VISIBLE : View.GONE);
         }
         if (mTextInputBar != null) {
+            if (enabled && mLastExtraRowHeightPx > 0) {
+                mTextInputBar.setMinimumHeight(mLastExtraRowHeightPx);
+            }
             mTextInputBar.setVisibility(enabled ? View.VISIBLE : View.GONE);
         }
         if (mTerminalView != null) {
-            mTerminalView.onToolbarGeometryChanged();
             mTerminalView.post(() -> mTerminalView.updateSize());
         }
         if (enabled && mTextInputEdit != null) {
@@ -5109,7 +5171,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent e, TerminalSession session) {
         if (keyCode == KeyEvent.KEYCODE_ENTER && session != null && !session.isRunning()) {
-            closeSession(session);
+            closeSession(session, true);
             return true;
         }
         return false;
@@ -5189,7 +5251,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         if (mService != null && mService.hasSession(finishedSession)) {
             int exitStatus = finishedSession.getExitStatus();
             if (exitStatus == 0) {
-                closeSession(finishedSession);
+                closeSession(finishedSession, true);
                 return;
             }
             if (exitStatus == -9 && Build.VERSION.SDK_INT >= PhantomProcessManager.MIN_AFFECTED_API && isTerminalVisible()) {
