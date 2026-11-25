@@ -1,0 +1,148 @@
+# DebianTerm
+
+<p align="center">
+  🇪🇸 <strong>Español</strong> | 🇺🇸 <a href="README.md">English</a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/thesergio9-spec/DebianTerm/releases/tag/v2.4.1">
+    <img src="https://img.shields.io/badge/release-v2.4.1-D70A53?style=flat-square" alt="Release v2.4.1">
+  </a>
+  <a href="LICENSE">
+    <img src="https://img.shields.io/badge/license-GPLv3-blue?style=flat-square" alt="Licencia GPLv3">
+  </a>
+  <img src="https://img.shields.io/badge/Android-7.0%2B%20(API%2024)-3DDC84?style=flat-square&logo=android&logoColor=white" alt="Android 7.0+ (API 24)">
+  <a href="https://ko-fi.com/teykercol">
+    <img src="https://img.shields.io/badge/Ko--fi-Apoyar%20Proyecto-FF5E5B?style=flat-square&logo=ko-fi&logoColor=white" alt="Apoyar en Ko-fi">
+  </a>
+</p>
+
+**DebianTerm** (`v2.4.1`) es un **instalador completo de Debian 12 (Bookworm)** y emulador de terminal + escritorio gráfico para Android basado en el motor y teclado de Termux (`terminal-emulator` y `terminal-view`), con **verificación de requerimientos mínimos al iniciar**, selector **Terminal (CLI) vs Modo Gráfico Híbrido** y **dos caminos de ejecución totalmente funcionales**:
+
+1. **Camino 1 — Con Root (Chroot Nativo)**: máximo rendimiento del kernel Linux y montajes reales para dispositivos con Magisk, KernelSU o APatch.
+2. **Camino 2 — Sin Root (PRoot Integrado)**: motor `PRoot` empaquetado directamente en el APK (`arm64-v8a` y `armeabi-v7a`), **100% independiente de Termux**, para dispositivos sin acceso root.
+
+Coexiste de forma independiente junto a Termux (`com.termux`) usando su propio paquete (`com.debianchroot.term`) y sin modificar instalaciones existentes en `/data/local/debian`.
+
+---
+
+## 📸 Capturas Reales
+
+> Capturadas en un Samsung Galaxy Note 10+ (Android 15) ejecutando DebianTerm `v2.4.1` y Debian 12 Bookworm.
+
+<table>
+  <tr>
+    <td align="center"><img src="docs/screenshots/01-dashboard.png" width="210" alt="Panel de Requisitos"><br><sub><b>Panel de Requisitos y Caminos</b></sub></td>
+    <td align="center"><img src="docs/screenshots/02-terminal-sixel.png" width="210" alt="Terminal Debian 12 con Sixel"><br><sub><b>Terminal Debian 12 y Sixel</b></sub></td>
+    <td align="center"><img src="docs/screenshots/03-drawer.png" width="210" alt="Menú Lateral Simplificado"><br><sub><b>Menú Lateral Compacto (v2.4.1)</b></sub></td>
+    <td align="center"><img src="docs/screenshots/04-about.png" width="210" alt="Acerca de y Apoyo en Ko-fi"><br><sub><b>Acerca de y Ko-fi</b></sub></td>
+  </tr>
+</table>
+
+---
+
+## 📥 Descarga Rápida
+
+Descarga el APK compilado desde la última Release:
+
+- **[DebianTerm.apk (v2.4.1)](https://github.com/thesergio9-spec/DebianTerm/releases/download/v2.4.1/DebianTerm.apk)**
+
+---
+
+## 🔒 Transparencia Técnica, `targetSdk=28` y Permisos
+
+DebianTerm es software libre sin publicidad, sin telemetría y con código verificable:
+
+- **¿Por qué `targetSdkVersion=28`?** Android 10–15 bloquea la ejecución directa (`execve`) desde almacenamiento interno de la app en aplicaciones compiladas con `targetSdk >= 29`. Mantener `targetSdk=28` aplica las reglas `untrusted_app_27` para que `libproot.so` y `libproot_loader.so` funcionen sin root ni Termux externo.
+- **Almacenamiento compartido (`MANAGE_EXTERNAL_STORAGE`):** solo se solicita cuando el usuario ejecuta explícitamente **`setup-storage`** para acceder a `/sdcard` y `~/storage/*` en modo Sin Root.
+- **Autoarranque (`RECEIVE_BOOT_COMPLETED`):** estrictamente opcional (desactivado por defecto) y solo ejecuta los scripts configurados por el usuario cuando se habilita en la configuración.
+- **Descargas verificadas:** las imágenes Debian 12 / 13 provienen de `images.linuxcontainers.org` y se validan con `SHA256SUMS` antes de extraerse.
+
+---
+
+## 🚀 Características Principales (`v2.4.1`)
+
+### 1. Panel de Inicio y Verificación de Requerimientos Mínimos
+Al abrir la app se ejecuta automáticamente un diagnóstico (`SystemRequirements`) antes de instalar o iniciar Debian 12:
+- **Sistema Android**: mínimo Android 7.0 (API 24).
+- **Arquitectura CPU**: `arm64-v8a`, `armeabi-v7a` (y soporte `x86_64`/`x86` según binarios).
+- **Memoria RAM y Almacenamiento**: verificación de RAM disponible, espacio libre interno y conectividad real contra `images.linuxcontainers.org`.
+- **Detección Dual**: detecta root (`Magisk`, `KernelSU`, `APatch`), motor PRoot integrado, estado Doze, notificaciones (Android 13+), `/sdcard` y **Phantom Process Killer (Android 12+)**.
+- **Inicio automático opcional**: interruptor (**"Entrar automáticamente a Debian 12 al iniciar"**) que respeta tu modo elegido (Terminal CLI o Modo Gráfico).
+
+### 2. Modo Gráfico Híbrido antes de iniciar Debian 12 (XFCE4 / LXDE)
+- **Visor VNC Integrado (`RfbClient` + `VncCanvasView`)**: cliente RFB 3.8 puro en Java (`Raw`, `CopyRect`, `Zlib`, `DesktopSize`, portapapeles `ServerCutText`) conectado a `Xtigervnc` en `127.0.0.1:5901` **sin apps externas**. Incluye modos **Touchpad** y **Táctil directo**, pellizco-zoom, teclado X11 e intercambio rápido `>_ Term`.
+- **Soporte opcional `Termux:X11` (60 FPS)**: detección automática de `com.termux.x11` para lanzar `CmdEntryPoint :0 -ac` o acceso directo a su descarga oficial.
+- **Entornos y resoluciones:** **XFCE4 (Completo)** o **LXDE (Ligero)** en `1280x720`, `960x540` o `1600x900`.
+
+### 3. Dos Caminos de Instalación y Ejecución Debian 12
+- **Camino 1 — Con Root (Chroot Nativo)**: detección segura de `/data/local/debian`, script `/data/local/bin/debian` con aislamiento `env -i`, montajes con `timeout 5`, contador `/dev/chroot_sessions` con desmontaje automático al cerrar la última sesión y subcomandos `status`, `stop`/`umount`, `exec`.
+- **Camino 2 — Sin Root (PRoot Integrado)**: binarios `libproot.so`, `libproot_loader.so`, `libproot_loader32.so`, extractor Java `TarExtractor` (`USTAR`, `PAX`, `GNU LongName`, symlinks, hardlinks, omisión de `/dev/*`, protección *path traversal*), DNS (`1.1.1.1`, `8.8.8.8`), `aid_inet`, APT sin sandbox, auto-detección `PROOT_NO_SECCOMP` y **`setup-storage`**.
+
+### 4. Menú Lateral Simplificado, Productividad y Gráficos Sixel
+- **Menú Lateral Compacto de 3 Filas (Nuevo en `v2.4.1`)**: sustituye la lista vertical larga por 3 filas inferiores organizadas (**`+ Nueva sesión`** -> selector Root / PRoot / Shell Android; **`Wake`** + **`Herramientas`** -> Snippets / `setup-storage` / SAF / Respaldos / Autoarranque; **`Inicio` / `Ajustes` / `Acerca`**), dando mucho más espacio a las sesiones activas.
+- **Modo Pan sin `SIGWINCH` + `DECSET 2026`**: evita rebobinado al abrir el teclado Android y soporta salida sincronizada `CSI ? 2026 h/l` + `DECRQM`.
+- **Gráficos Sixel inline (`SixelDecoder` / `SixelImage`)**: decodificador nativo DEC VT340/XTerm (`img2sixel`, `chafa`, `lsix`, `gnuplot`), reporte DA1 (`;4;`) y `XTSMGRAPHICS` (`256` colores), anclaje al *scrollback* y demo directa en **Ajustes rápidos**.
+- **Búsqueda en Terminal (`TerminalSearch`)**: sobre las 4,000 líneas del historial con sensibilidad `Aa`, `▲`/`▼` y copia rápida.
+- **Snippets (`SnippetManager`) y Barra Gboard/Voz (`📝`)**: comandos rápidos y barra de entrada deslizable con autocorrección y dictado.
+- **Mitigador de *Phantom Process Killer* (`PhantomProcessManager`)**: detecta `signal 9` en Android 12–15 y ofrece fix directo con Root o comandos ADB exactos sin Root.
+- **Storage Access Framework (`DebianDocumentsProvider`)**: acceso a `/root` sin root desde Material Files, Acode, QuickEdit o Archivos sin copiar por `/sdcard`.
+- **Respaldo y Restauración `.tar.gz` (`BackupManager`)**: copias de Home + Ajustes, Rootfs PRoot completo o `/root` Chroot.
+- **Personalización sin dotfiles**: Nerd Font integrada (`MesloLGS_NF_Regular.ttf`), importación de fuentes `.ttf`/`.otf`, 5 esquemas de color, **Material You** (Android 12+), editor visual de teclas extra, Wake Lock + `WifiLock` y autoarranque opcional (`BootReceiver`).
+
+---
+
+## 🛠️ Estructura del Proyecto
+
+```text
+DebianTerm/
+├── AndroidManifest.xml          # Configuración com.debianchroot.term + SAF Provider (targetSdk 28)
+├── assets/fonts/                # Fuente Nerd Font integrada (MesloLGS_NF_Regular.ttf)
+├── docs/screenshots/            # Capturas reales en Galaxy Note 10+
+├── .github/
+│   ├── FUNDING.yml              # Configuración Ko-fi
+│   └── ISSUE_TEMPLATE/          # Plantillas de bug y sugerencias
+├── LICENSE                      # GNU GPL v3
+├── src/
+│   ├── com/debianchroot/term/   # UI, Dashboard, Drawer, Chroot/PRoot, SAF, Backups, VNC y Sixel
+│   ├── com/termux/terminal/     # Motor PTY con DECSET 2026, modo Pan y decodificador Sixel
+│   └── com/termux/view/         # Renderizador terminal con Sixel inline y gestos
+├── libs/                        # Bibliotecas JAR (annotation-1.5.0, xz-1.9)
+├── jniLibs/                     # Binarios nativos arm64-v8a y armeabi-v7a
+├── tests/                       # Suite de 23 pruebas unitarias en JVM (VerifyAll.java)
+├── setup-deps.sh                # Descarga componentes base Termux, JARs y PRoot (SHA-256)
+└── build.sh                     # Compilación completa (aapt2, javac, d8, zipalign, apksigner)
+```
+
+---
+
+## 📦 Compilación desde la Terminal
+
+```bash
+git clone https://github.com/thesergio9-spec/DebianTerm.git
+cd DebianTerm
+./setup-deps.sh
+./build.sh
+```
+
+El APK firmado se genera en `build/DebianTerm-release.apk`.
+
+---
+
+## 🧪 Pruebas Unitarias
+
+La suite [VerifyAll.java](tests/VerifyAll.java) valida en JVM **23 pruebas clave** (`DECSET 2026`, modo Pan, parser LXC/SHA-256, scripts `sh -n`, temas de color, requisitos, `TarExtractor`, PRoot, cierre suave, scripts gráficos XFCE4/LXDE, cliente RFB 3.8, sesiones, Wake/WifiLock, `setup-storage`, `PhantomProcessManager`, `TerminalSearch`, `SnippetManager`, `DebianDocumentsProvider`, `BackupManager` `.tar.gz`, Teclas Extra / Nerd Font TTF, `BootReceiver`, `SixelDecoder` y `TerminalEmulator` Sixel):
+
+```bash
+javac -encoding UTF-8 -cp build/classes:/opt/android-sdk/android.jar:libs/xz-1.9.jar -d build/test-classes tests/VerifyAll.java
+java -cp build/test-classes:build/classes:/opt/android-sdk/android.jar:libs/xz-1.9.jar VerifyAll
+```
+
+---
+
+## 👤 Autor, Soporte y Licencia
+
+- **Desarrollador:** Sergio Romero (**TeykerCol**) — [@thesergio9-spec](https://github.com/thesergio9-spec)
+- **Reportes de fallos y sugerencias:** Exclusivamente mediante **[GitHub Issues](https://github.com/thesergio9-spec/DebianTerm/issues)**.
+- **Apoyar el proyecto:** Si DebianTerm te resulta útil, puedes invitar un café en **[Ko-fi](https://ko-fi.com/teykercol)**.
+- **Licencia:** Distribuido bajo **GNU General Public License v3.0** ([LICENSE](LICENSE)), reutilizando componentes de código abierto de [Termux](https://github.com/termux/termux-app) (GPLv3) y [PRoot](https://github.com/termux/proot) (GPLv2+ / GPLv3).

@@ -86,6 +86,9 @@ import java.util.regex.Pattern;
 public final class MainActivity extends Activity implements TerminalViewClient, TerminalSessionClient {
 
     private static final String LOG_TAG = "DebianTerm";
+    private static final String APP_GITHUB_URL = "https://github.com/thesergio9-spec/DebianTerm";
+    private static final String APP_ISSUES_URL = "https://github.com/thesergio9-spec/DebianTerm/issues";
+    private static final String APP_KOFI_URL = "https://ko-fi.com/teykercol";
 
     private static final int CTX_COPY_URL = 101;
     private static final int CTX_SHARE_TEXT = 102;
@@ -115,10 +118,8 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
     private TextView mChrootPill;
     private TextView mDrawerChrootSummary;
     private LinearLayout mDrawerSessionsContainer;
-    private Button mDrawerAndroidShellBtn;
     private Button mDrawerDesktopBtn;
     private Button mDrawerWakeLockBtn;
-    private Button mDrawerSetupStorageBtn;
 
     // Terminal search & Gboard text input dock
     private LinearLayout mSearchBar;
@@ -851,6 +852,15 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         footerCard.addView(autoHint);
         container.addView(footerCard);
 
+        TextView devFooter = new TextView(this);
+        devFooter.setText("DebianTerm • Desarrollado por TeykerCol • ☕ Apoyar en Ko-fi");
+        devFooter.setTextColor(Color.parseColor("#8B949E"));
+        devFooter.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
+        devFooter.setGravity(Gravity.CENTER_HORIZONTAL);
+        devFooter.setPadding(dp(8), dp(14), dp(8), dp(8));
+        devFooter.setOnClickListener(v -> showAboutDialog());
+        container.addView(devFooter);
+
         scroll.addView(container);
         return scroll;
     }
@@ -1233,10 +1243,17 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         appTitle.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
         header.addView(appTitle);
 
+        TextView devSub = new TextView(this);
+        devSub.setText("Desarrollado por TeykerCol");
+        devSub.setTextColor(Color.parseColor("#58A6FF"));
+        devSub.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        devSub.setPadding(0, dp(1), 0, 0);
+        header.addView(devSub);
+
         mDrawerChrootSummary = new TextView(this);
         mDrawerChrootSummary.setText("Debian 12: comprobando...");
         mDrawerChrootSummary.setTextColor(Color.parseColor("#8B949E"));
-        mDrawerChrootSummary.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        mDrawerChrootSummary.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
         mDrawerChrootSummary.setPadding(0, dp(4), 0, 0);
         header.addView(mDrawerChrootSummary);
 
@@ -1266,9 +1283,14 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         divider2.setBackgroundColor(Color.parseColor("#30363D"));
         root.addView(divider2, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)));
 
+        View divider = new View(this);
+        divider.setBackgroundColor(Color.parseColor("#30363D"));
+        root.addView(divider, new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(1)));
+
         LinearLayout actions = new LinearLayout(this);
         actions.setOrientation(LinearLayout.VERTICAL);
-        actions.setPadding(dp(10), dp(8), dp(10), dp(12));
+        actions.setPadding(dp(10), dp(8), dp(10), dp(10));
 
         mDrawerDesktopBtn = makeDrawerActionButton("🖥 Volver al Escritorio Gráfico", "#238636", v -> {
             mDrawerLayout.closeDrawer();
@@ -1277,49 +1299,65 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         mDrawerDesktopBtn.setVisibility(View.GONE);
         actions.addView(mDrawerDesktopBtn);
 
-        actions.addView(makeDrawerActionButton("+ Nueva sesión Debian 12 (Root)", "#D70A53", v -> {
-            mDrawerLayout.closeDrawer();
-            openNewRootDebianSession();
-        }));
-        actions.addView(makeDrawerActionButton("+ Nueva sesión Debian 12 (Sin Root)", "#238636", v -> {
-            mDrawerLayout.closeDrawer();
-            openNewProotDebianSession();
-        }));
-        mDrawerAndroidShellBtn = makeDrawerActionButton("+ Shell Android (sh)", "#21262D", v -> {
-            mDrawerLayout.closeDrawer();
-            if (mLastReport.hasRoot) {
-                openNewAndroidRootSession();
-            } else {
-                openNewAndroidShellSession();
-            }
-        });
-        actions.addView(mDrawerAndroidShellBtn);
-        mDrawerWakeLockBtn = makeDrawerActionButton("⚡ Activar Wake Lock (CPU + WiFi)", "#21262D", v ->
+        Button newSessionBtn = makeDrawerActionButton("+ Nueva sesión", "#D70A53", v ->
+            showNewSessionChooserDialog());
+        newSessionBtn.setGravity(Gravity.CENTER);
+        actions.addView(newSessionBtn);
+
+        LinearLayout toolsRow = new LinearLayout(this);
+        toolsRow.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout.LayoutParams trLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        trLp.setMargins(0, dp(3), 0, dp(3));
+
+        mDrawerWakeLockBtn = makeDrawerCompactButton("⚡ Wake: OFF", "#21262D", v ->
             toggleWakeLockFromUi());
-        actions.addView(mDrawerWakeLockBtn);
-        mDrawerSetupStorageBtn = makeDrawerActionButton("📁 Configurar almacenamiento (setup-storage)", "#21262D", v ->
-            runSetupStorageFlow());
-        actions.addView(mDrawerSetupStorageBtn);
-        actions.addView(makeDrawerActionButton("⚡ Snippets / Comandos rápidos", "#21262D", v -> {
-            mDrawerLayout.closeDrawer();
-            showSnippetsDialog();
-        }));
-        actions.addView(makeDrawerActionButton("💾 Respaldo y Restauración", "#21262D", v -> {
-            mDrawerLayout.closeDrawer();
-            showBackupRestoreDialog();
-        }));
-        actions.addView(makeDrawerActionButton("🚀 Autoarranque al iniciar", "#21262D", v -> {
-            mDrawerLayout.closeDrawer();
-            showBootAutostartDialog();
-        }));
-        actions.addView(makeDrawerActionButton("Panel de Inicio y Requisitos", "#1F6FEB", v -> {
+        LinearLayout.LayoutParams halfLeft = new LinearLayout.LayoutParams(
+            0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        halfLeft.setMargins(0, 0, dp(3), 0);
+        toolsRow.addView(mDrawerWakeLockBtn, halfLeft);
+
+        Button toolsBtn = makeDrawerCompactButton("🧰 Herramientas", "#21262D", v ->
+            showDrawerToolsDialog());
+        LinearLayout.LayoutParams halfRight = new LinearLayout.LayoutParams(
+            0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        halfRight.setMargins(dp(3), 0, 0, 0);
+        toolsRow.addView(toolsBtn, halfRight);
+        actions.addView(toolsRow, trLp);
+
+        LinearLayout navRow = new LinearLayout(this);
+        navRow.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout.LayoutParams nrLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        nrLp.setMargins(0, dp(3), 0, 0);
+
+        Button homeBtn = makeDrawerCompactButton("⌂ Inicio", "#1F6FEB", v -> {
             mDrawerLayout.closeDrawer();
             showDashboardView();
-        }));
-        actions.addView(makeDrawerActionButton("Ajustes rápidos", "#21262D", v -> {
+        });
+        LinearLayout.LayoutParams thirdLeft = new LinearLayout.LayoutParams(
+            0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        thirdLeft.setMargins(0, 0, dp(2), 0);
+        navRow.addView(homeBtn, thirdLeft);
+
+        Button settingsBtn = makeDrawerCompactButton("⚙ Ajustes", "#21262D", v -> {
             mDrawerLayout.closeDrawer();
             showSettingsDialog();
-        }));
+        });
+        LinearLayout.LayoutParams thirdMid = new LinearLayout.LayoutParams(
+            0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        thirdMid.setMargins(dp(2), 0, dp(2), 0);
+        navRow.addView(settingsBtn, thirdMid);
+
+        Button aboutBtn = makeDrawerCompactButton("ℹ Acerca", "#21262D", v -> {
+            mDrawerLayout.closeDrawer();
+            showAboutDialog();
+        });
+        LinearLayout.LayoutParams thirdRight = new LinearLayout.LayoutParams(
+            0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        thirdRight.setMargins(dp(2), 0, 0, 0);
+        navRow.addView(aboutBtn, thirdRight);
+        actions.addView(navRow, nrLp);
 
         root.addView(actions, new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
@@ -1348,6 +1386,8 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         btn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
         btn.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
         btn.setPadding(dp(12), dp(8), dp(12), dp(8));
+        btn.setMinHeight(0);
+        btn.setMinimumHeight(dp(38));
         btn.setBackground(makePillBg(bgHex));
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -1355,6 +1395,164 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         btn.setLayoutParams(lp);
         btn.setOnClickListener(listener);
         return btn;
+    }
+
+    private Button makeDrawerCompactButton(String text, String bgHex, View.OnClickListener listener) {
+        Button btn = new Button(this);
+        btn.setText(text);
+        btn.setAllCaps(false);
+        btn.setSingleLine(true);
+        btn.setEllipsize(TextUtils.TruncateAt.END);
+        btn.setTextColor(Color.WHITE);
+        btn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
+        btn.setGravity(Gravity.CENTER);
+        btn.setPadding(dp(6), dp(7), dp(6), dp(7));
+        btn.setMinHeight(0);
+        btn.setMinimumHeight(dp(36));
+        btn.setBackground(makePillBg(bgHex));
+        btn.setOnClickListener(listener);
+        return btn;
+    }
+
+    private void addChooserDialogButton(LinearLayout parent, String label, String bgHex,
+            boolean topMargin, final AlertDialog dlg, final Runnable action) {
+        Button btn = makeActionButton(label, bgHex, v -> {
+            dlg.dismiss();
+            if (action != null) action.run();
+        });
+        btn.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
+        btn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.setMargins(0, topMargin ? dp(8) : 0, 0, 0);
+        parent.addView(btn, lp);
+    }
+
+    private void showNewSessionChooserDialog() {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(18), dp(12), dp(18), dp(10));
+
+        final AlertDialog dlg = new AlertDialog.Builder(this)
+            .setTitle("Nueva sesión")
+            .setView(box)
+            .setNegativeButton("Cancelar", null)
+            .create();
+
+        boolean hasRoot = mLastReport != null && mLastReport.hasRoot;
+        addChooserDialogButton(box, "🐧 Debian 12 (Root Chroot)", "#D70A53", false, dlg, () -> {
+            mDrawerLayout.closeDrawer();
+            openNewRootDebianSession();
+        });
+        addChooserDialogButton(box, "📦 Debian 12 (Sin Root / PRoot)", "#238636", true, dlg, () -> {
+            mDrawerLayout.closeDrawer();
+            openNewProotDebianSession();
+        });
+        addChooserDialogButton(box,
+            hasRoot ? "⚡ Shell Android (su)" : "🐚 Shell Android (sh)", "#21262D", true, dlg, () -> {
+                mDrawerLayout.closeDrawer();
+                if (hasRoot) {
+                    openNewAndroidRootSession();
+                } else {
+                    openNewAndroidShellSession();
+                }
+            });
+
+        dlg.show();
+    }
+
+    private void showDrawerToolsDialog() {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(18), dp(12), dp(18), dp(10));
+
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(box);
+
+        final AlertDialog dlg = new AlertDialog.Builder(this)
+            .setTitle("Herramientas")
+            .setView(scroll)
+            .setNegativeButton("Cerrar", null)
+            .create();
+
+        boolean storageOk = ProotManager.hasSharedStorageAccess(this);
+        boolean bootActive = mSettings.isBootAutostartEnabled();
+
+        addChooserDialogButton(box, "⚡ Snippets / Comandos rápidos", "#21262D", false, dlg, () -> {
+            mDrawerLayout.closeDrawer();
+            showSnippetsDialog();
+        });
+        addChooserDialogButton(box,
+            storageOk ? "📁 Almacenamiento compartido (/sdcard OK)" : "📁 Configurar almacenamiento (setup-storage)",
+            storageOk ? "#238636" : "#21262D", true, dlg, () -> {
+                mDrawerLayout.closeDrawer();
+                runSetupStorageFlow();
+            });
+        addChooserDialogButton(box, "📂 Abrir archivos Debian (SAF)", "#21262D", true, dlg, () -> {
+            mDrawerLayout.closeDrawer();
+            openDocumentsProvider();
+        });
+        addChooserDialogButton(box, "💾 Respaldo y Restauración (.tar.gz)", "#21262D", true, dlg, () -> {
+            mDrawerLayout.closeDrawer();
+            showBackupRestoreDialog();
+        });
+        addChooserDialogButton(box,
+            bootActive ? "🚀 Autoarranque al iniciar (ACTIVO)" : "🚀 Autoarranque al iniciar",
+            bootActive ? "#238636" : "#21262D", true, dlg, () -> {
+                mDrawerLayout.closeDrawer();
+                showBootAutostartDialog();
+            });
+
+        dlg.show();
+    }
+
+    private void showAboutDialog() {
+        String ver = "2.4.1";
+        try {
+            ver = getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+        } catch (Exception ignored) {
+        }
+
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(18), dp(12), dp(18), dp(10));
+
+        TextView info = new TextView(this);
+        info.setText("Debian 12 (Bookworm) Chroot & PRoot Terminal para Android con gráficos Sixel y escritorio XFCE4/LXDE.\n\n"
+            + "Desarrollado por: TeykerCol (Sergio Romero)\n"
+            + "Licencia: GNU GPL v3 (Código Abierto)\n"
+            + "Soporte y reportes: GitHub Issues");
+        info.setTextColor(Color.parseColor("#E6EDF3"));
+        info.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
+        info.setLineSpacing(0f, 1.15f);
+        box.addView(info);
+
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(box);
+
+        final AlertDialog dlg = new AlertDialog.Builder(this)
+            .setTitle("DebianTerm v" + ver)
+            .setView(scroll)
+            .setPositiveButton("Cerrar", null)
+            .create();
+
+        addChooserDialogButton(box, "☕ Apoyar proyecto en Ko-fi", "#D9463E", true, dlg,
+            () -> openExternalUrl(APP_KOFI_URL));
+        addChooserDialogButton(box, "💻 Código fuente en GitHub", "#1F6FEB", true, dlg,
+            () -> openExternalUrl(APP_GITHUB_URL));
+        addChooserDialogButton(box, "🐛 Reportar fallo (GitHub Issues)", "#21262D", true, dlg,
+            () -> openExternalUrl(APP_ISSUES_URL));
+
+        dlg.show();
+    }
+
+    private void openExternalUrl(String url) {
+        try {
+            Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+            startActivity(intent);
+        } catch (ActivityNotFoundException e) {
+            Toast.makeText(this, "No se encontró navegador para abrir el enlace.", Toast.LENGTH_LONG).show();
+        }
     }
 
     private GradientDrawable makePillBg(String hex) {
@@ -1700,16 +1898,9 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
             boolean held = mService != null && mService.isWakeLockHeld();
             boolean wifi = mService != null && mService.isWifiLockHeld();
             mDrawerWakeLockBtn.setText(held
-                ? (wifi ? "⚡ Wake Lock: ACTIVO (CPU + WiFi)" : "⚡ Wake Lock: ACTIVO (CPU)")
-                : "⚡ Activar Wake Lock (CPU + WiFi)");
+                ? (wifi ? "⚡ Wake: CPU+WiFi" : "⚡ Wake: CPU")
+                : "⚡ Wake: OFF");
             mDrawerWakeLockBtn.setBackground(makePillBg(held ? "#9E6A03" : "#21262D"));
-        }
-        if (mDrawerSetupStorageBtn != null) {
-            boolean storageOk = ProotManager.hasSharedStorageAccess(this);
-            mDrawerSetupStorageBtn.setText(storageOk
-                ? "📁 Almacenamiento: /sdcard OK"
-                : "📁 Configurar almacenamiento (setup-storage)");
-            mDrawerSetupStorageBtn.setBackground(makePillBg(storageOk ? "#238636" : "#21262D"));
         }
     }
 
@@ -2302,10 +2493,6 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         } else {
             mChrootPill.setText("⌂ Inicio");
             mChrootPill.setBackground(makePillBg("#D70A53"));
-        }
-
-        if (mDrawerAndroidShellBtn != null) {
-            mDrawerAndroidShellBtn.setText(r.hasRoot ? "+ Shell Android (su)" : "+ Shell Android (sh)");
         }
 
         StringBuilder drawerSum = new StringBuilder();
@@ -3179,6 +3366,13 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         btLp.setMargins(0, dp(6), 0, 0);
         content.addView(bootBtn, btLp);
 
+        final Button aboutBtn = makeActionButton("ℹ Acerca de DebianTerm (TeykerCol)", "#1F6FEB", null);
+        aboutBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        LinearLayout.LayoutParams abLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        abLp.setMargins(0, dp(6), 0, 0);
+        content.addView(aboutBtn, abLp);
+
         ScrollView scroll = new ScrollView(this);
         scroll.addView(content);
 
@@ -3207,6 +3401,10 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         bootBtn.setOnClickListener(v -> {
             settingsDlg.dismiss();
             showBootAutostartDialog();
+        });
+        aboutBtn.setOnClickListener(v -> {
+            settingsDlg.dismiss();
+            showAboutDialog();
         });
 
         settingsDlg.show();

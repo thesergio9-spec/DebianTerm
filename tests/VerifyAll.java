@@ -1273,8 +1273,16 @@ public final class VerifyAll {
         }
 
         String manifest = new String(Files.readAllBytes(Paths.get("AndroidManifest.xml")), StandardCharsets.UTF_8);
-        check(manifest.contains("android:versionCode=\"9\"") && manifest.contains("android:versionName=\"2.4.0\""),
-            "AndroidManifest must bump versionCode=9 / versionName=2.4.0");
+        check(manifest.contains("android:versionCode=\"10\"") && manifest.contains("android:versionName=\"2.4.1\""),
+            "AndroidManifest must bump versionCode=10 / versionName=2.4.1");
+        check(Files.exists(Paths.get("LICENSE"))
+            && new String(Files.readAllBytes(Paths.get("LICENSE")), StandardCharsets.UTF_8)
+                .contains("GNU GENERAL PUBLIC LICENSE"),
+            "LICENSE must exist with GNU GENERAL PUBLIC LICENSE text");
+        check(Files.exists(Paths.get(".github/FUNDING.yml"))
+            && new String(Files.readAllBytes(Paths.get(".github/FUNDING.yml")), StandardCharsets.UTF_8)
+                .contains("ko_fi: teykercol"),
+            ".github/FUNDING.yml must declare ko_fi: teykercol");
         check(manifest.contains("android.permission.RECEIVE_BOOT_COMPLETED")
             && manifest.contains(".BootReceiver")
             && manifest.contains("android.intent.action.BOOT_COMPLETED"),
