@@ -402,7 +402,7 @@ public final class TarExtractor {
         }
     }
 
-    private static String readSymlinkTarget(File symlinkFile) {
+    public static String readSymlinkTarget(File symlinkFile) {
         try {
             return Os.readlink(symlinkFile.getAbsolutePath());
         } catch (ErrnoException e) {

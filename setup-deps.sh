@@ -9,6 +9,7 @@ mkdir -p \
   src/com/termux/view/support \
   src/com/termux/view/textselection \
   src/com/debianchroot/term \
+  assets/fonts \
   res/drawable \
   res/layout \
   res/values \
@@ -119,7 +120,24 @@ for i in range(0, len(args), 3):
     print(f"OK {zip_name} ({actual_sha[:12]}...) -> {out_dir}")
 PYEOF
 
-echo "[5/5] Verificando simbolos JNI en libtermux.so y binarios PRoot..."
+echo "[5/6] Descargando Nerd Font integrada (MesloLGS NF Regular, Apache-2.0)..."
+FONT_URL="https://github.com/romkatv/powerlevel10k-media/raw/master/MesloLGS%20NF%20Regular.ttf"
+FONT_DST="assets/fonts/MesloLGS_NF_Regular.ttf"
+if [ ! -s "$FONT_DST" ]; then
+  curl -fsSL -L "$FONT_URL" -o "$FONT_DST"
+fi
+python3 - "$FONT_DST" << 'PYEOF'
+import os, sys
+path = sys.argv[1]
+size = os.path.getsize(path)
+with open(path, "rb") as f:
+    magic = f.read(4)
+if size < 100000 or magic not in (b"\x00\x01\x00\x00", b"OTTO", b"true", b"ttcf"):
+    raise SystemExit(f"ERROR: Fuente Nerd Font inválida ({path}, size={size}, magic={magic.hex()})")
+print(f"OK Nerd Font ({size} bytes, magic={magic.hex()}) -> {path}")
+PYEOF
+
+echo "[6/6] Verificando simbolos JNI en libtermux.so y binarios PRoot..."
 readelf -Ws jniLibs/arm64-v8a/libtermux.so | grep Java_com_termux_terminal_JNI
 readelf -Ws jniLibs/armeabi-v7a/libtermux.so | grep Java_com_termux_terminal_JNI
 ls -la jniLibs/arm64-v8a/libproot*.so jniLibs/armeabi-v7a/libproot*.so

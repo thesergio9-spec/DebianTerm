@@ -4,6 +4,9 @@ import android.content.Context;
 import android.content.SharedPreferences;
 import android.graphics.Color;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.util.Properties;
 
 /**
@@ -30,12 +33,31 @@ public final class TerminalSettings {
     private static final String KEY_GUI_RESOLUTION = "gui_resolution";
     private static final String KEY_AUTO_WAKELOCK = "auto_wakelock";
     private static final String KEY_SNIPPETS_DATA = "snippets_data_v1";
+    private static final String KEY_FONT_ID = "font_id";
+    private static final String KEY_CUSTOM_EXTRA_KEYS = "custom_extra_keys_v1";
+    private static final String KEY_MATERIAL_YOU = "material_you_enabled";
 
     public static final String MODE_ROOT = "root";
     public static final String MODE_PROOT = "proot";
 
     public static final String UI_MODE_CLI = "cli";
     public static final String UI_MODE_GUI = "gui";
+
+    public static final String FONT_NERD_MESLO = "nerd_meslo";
+    public static final String FONT_SYSTEM_MONO = "system_mono";
+    public static final String FONT_CUSTOM = "custom_ttf";
+
+    public static final String[] ALL_FONT_IDS = {
+        FONT_NERD_MESLO,
+        FONT_SYSTEM_MONO,
+        FONT_CUSTOM
+    };
+
+    public static final String[] ALL_FONT_NAMES = {
+        "MesloLGS Nerd Font (Integrada • iconos)",
+        "Monospace del sistema (Android)",
+        "Fuente personalizada (.ttf / .otf)"
+    };
 
     public static final String[] ALL_GUI_RESOLUTIONS = {
         "1280x720",
@@ -214,6 +236,111 @@ public final class TerminalSettings {
 
     public void saveSnippets(java.util.List<SnippetManager.Snippet> snippets) {
         mPrefs.edit().putString(KEY_SNIPPETS_DATA, SnippetManager.serialize(snippets)).apply();
+    }
+
+    public String getFontId() {
+        String id = mPrefs.getString(KEY_FONT_ID, FONT_NERD_MESLO);
+        for (String valid : ALL_FONT_IDS) {
+            if (valid.equals(id)) return valid;
+        }
+        return FONT_NERD_MESLO;
+    }
+
+    public void setFontId(String fontId) {
+        String chosen = FONT_NERD_MESLO;
+        for (String valid : ALL_FONT_IDS) {
+            if (valid.equals(fontId)) {
+                chosen = valid;
+                break;
+            }
+        }
+        mPrefs.edit().putString(KEY_FONT_ID, chosen).apply();
+    }
+
+    public String getCustomExtraKeysSpec() {
+        String spec = mPrefs.getString(KEY_CUSTOM_EXTRA_KEYS, ExtraKeysBarView.PRESET_STANDARD);
+        return (spec == null || spec.trim().isEmpty()) ? ExtraKeysBarView.PRESET_STANDARD : spec;
+    }
+
+    public void setCustomExtraKeysSpec(String spec) {
+        String clean = (spec == null || spec.trim().isEmpty()) ? ExtraKeysBarView.PRESET_STANDARD : spec.trim();
+        mPrefs.edit().putString(KEY_CUSTOM_EXTRA_KEYS, clean).apply();
+    }
+
+    public boolean isMaterialYouEnabled() {
+        return mPrefs.getBoolean(KEY_MATERIAL_YOU, false);
+    }
+
+    public void setMaterialYouEnabled(boolean enabled) {
+        mPrefs.edit().putBoolean(KEY_MATERIAL_YOU, enabled).apply();
+    }
+
+    public static byte[] serializePropertiesMap(Properties props) {
+        if (props == null) return new byte[0];
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        try {
+            props.store(baos, "DebianTerm Settings Backup");
+        } catch (IOException ignored) {
+        }
+        return baos.toByteArray();
+    }
+
+    public static Properties deserializePropertiesMap(byte[] bytes) {
+        Properties props = new Properties();
+        if (bytes == null || bytes.length == 0) return props;
+        try {
+            props.load(new ByteArrayInputStream(bytes));
+        } catch (IOException | IllegalArgumentException ignored) {
+        }
+        return props;
+    }
+
+    public byte[] exportMetadataBytes() {
+        Properties p = new Properties();
+        p.setProperty(KEY_COLOR_SCHEME, getColorSchemeId());
+        p.setProperty(KEY_FONT_SIZE_PX, Integer.toString(getFontSizePx()));
+        p.setProperty(KEY_FONT_ID, getFontId());
+        p.setProperty(KEY_EXTRA_KEYS_MODE, getExtraKeysMode());
+        p.setProperty(KEY_CUSTOM_EXTRA_KEYS, getCustomExtraKeysSpec());
+        p.setProperty(KEY_MATERIAL_YOU, Boolean.toString(isMaterialYouEnabled()));
+        p.setProperty(KEY_HAPTIC_ENABLED, Boolean.toString(isHapticEnabled()));
+        p.setProperty(KEY_AUTO_WAKELOCK, Boolean.toString(isAutoWakeLockEnabled()));
+        p.setProperty(KEY_SOFT_KEYBOARD_PAN_MAIN_SCREEN, Boolean.toString(isSoftKeyboardPanMainScreen()));
+        p.setProperty(KEY_LAUNCH_UI_MODE, getLaunchUiMode());
+        p.setProperty(KEY_DESKTOP_ENV, getDesktopEnv());
+        p.setProperty(KEY_GUI_BACKEND, getGuiBackend());
+        p.setProperty(KEY_GUI_RESOLUTION, getGuiResolution());
+        p.setProperty(KEY_SNIPPETS_DATA, SnippetManager.serialize(getSnippets()));
+        return serializePropertiesMap(p);
+    }
+
+    public boolean importMetadataBytes(byte[] bytes) {
+        Properties p = deserializePropertiesMap(bytes);
+        if (p.isEmpty()) return false;
+        if (p.containsKey(KEY_COLOR_SCHEME)) setColorSchemeId(p.getProperty(KEY_COLOR_SCHEME));
+        if (p.containsKey(KEY_FONT_SIZE_PX)) {
+            try {
+                setFontSizePx(Integer.parseInt(p.getProperty(KEY_FONT_SIZE_PX).trim()));
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        if (p.containsKey(KEY_FONT_ID)) setFontId(p.getProperty(KEY_FONT_ID));
+        if (p.containsKey(KEY_EXTRA_KEYS_MODE)) setExtraKeysMode(p.getProperty(KEY_EXTRA_KEYS_MODE));
+        if (p.containsKey(KEY_CUSTOM_EXTRA_KEYS)) setCustomExtraKeysSpec(p.getProperty(KEY_CUSTOM_EXTRA_KEYS));
+        if (p.containsKey(KEY_MATERIAL_YOU)) setMaterialYouEnabled(Boolean.parseBoolean(p.getProperty(KEY_MATERIAL_YOU)));
+        if (p.containsKey(KEY_HAPTIC_ENABLED)) setHapticEnabled(Boolean.parseBoolean(p.getProperty(KEY_HAPTIC_ENABLED)));
+        if (p.containsKey(KEY_AUTO_WAKELOCK)) setAutoWakeLockEnabled(Boolean.parseBoolean(p.getProperty(KEY_AUTO_WAKELOCK)));
+        if (p.containsKey(KEY_SOFT_KEYBOARD_PAN_MAIN_SCREEN)) {
+            setSoftKeyboardPanMainScreen(Boolean.parseBoolean(p.getProperty(KEY_SOFT_KEYBOARD_PAN_MAIN_SCREEN)));
+        }
+        if (p.containsKey(KEY_LAUNCH_UI_MODE)) setLaunchUiMode(p.getProperty(KEY_LAUNCH_UI_MODE));
+        if (p.containsKey(KEY_DESKTOP_ENV)) setDesktopEnv(p.getProperty(KEY_DESKTOP_ENV));
+        if (p.containsKey(KEY_GUI_BACKEND)) setGuiBackend(p.getProperty(KEY_GUI_BACKEND));
+        if (p.containsKey(KEY_GUI_RESOLUTION)) setGuiResolution(p.getProperty(KEY_GUI_RESOLUTION));
+        if (p.containsKey(KEY_SNIPPETS_DATA)) {
+            saveSnippets(SnippetManager.deserialize(p.getProperty(KEY_SNIPPETS_DATA)));
+        }
+        return true;
     }
 
     public boolean isProotDisableSeccomp() {

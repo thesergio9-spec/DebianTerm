@@ -1,5 +1,7 @@
+import com.debianchroot.term.BackupManager;
 import com.debianchroot.term.ChrootInstaller;
 import com.debianchroot.term.ChrootManager;
+import com.debianchroot.term.DebianDocumentsProvider;
 import com.debianchroot.term.DebianTermService;
 import com.debianchroot.term.DesktopManager;
 import com.debianchroot.term.ExtraKeysBarView;
@@ -37,6 +39,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Properties;
 import java.util.concurrent.CountDownLatch;
@@ -64,6 +67,9 @@ import java.util.zip.Deflater;
  * 15) PhantomProcessManager status parsing & ADB mitigation command generation
  * 16) TerminalSearch anchored-row search across scrollback, case sensitivity, wide chars & TerminalView API
  * 17) SnippetManager defaults, escaped serialization round-trip & Gboard TextInput listener contract
+ * 18) DebianDocumentsProvider (SAF) path traversal guard, external symlink blocking, MIME types & Manifest
+ * 19) BackupManager pure-Java .tar.gz round-trip (perms, PAX >110 chars, symlinks, exclusions, metadata)
+ * 20) ExtraKeysBarView custom spec/presets parser, bundled Nerd Font TTF & Phase 2 settings API
  */
 public final class VerifyAll {
 
@@ -136,7 +142,10 @@ public final class VerifyAll {
         testPhantomProcessParser();
         testTerminalSearch();
         testSnippetManagerSerialization();
-        System.out.println("ALL 17 VERIFICATION TESTS PASSED.");
+        testDocumentsProviderSafety();
+        testBackupManagerTarGzRoundTrip();
+        testExtraKeysCustomSpecAndFonts();
+        System.out.println("ALL 20 VERIFICATION TESTS PASSED.");
     }
 
     private static void testDecset2026() {
@@ -980,6 +989,244 @@ public final class VerifyAll {
             "ExtraKeysBarView.Listener.onSwipeToTextInput must exist");
 
         System.out.println("[PASS] Test 17: SnippetManager serialization, defaults & Gboard swipe listener");
+    }
+
+    private static void testDocumentsProviderSafety() throws Exception {
+        check("com.debianchroot.term.documents".equals(DebianDocumentsProvider.AUTHORITY),
+            "Unexpected DocumentsProvider AUTHORITY");
+        check("debianterm_home".equals(DebianDocumentsProvider.ROOT_ID_HOME),
+            "Unexpected ROOT_ID_HOME");
+        check("home:".equals(DebianDocumentsProvider.DOC_ID_PREFIX),
+            "Unexpected DOC_ID_PREFIX");
+
+        Path sandbox = Files.createTempDirectory("debianterm-saf-test");
+        File baseDir = new File(sandbox.toFile(), "root");
+        File notesDir = new File(baseDir, "notes");
+        check(notesDir.mkdirs(), "Could not create temp SAF notes dir");
+        File helloPy = new File(notesDir, "hello.py");
+        Files.write(helloPy.toPath(), "print('hi')\n".getBytes(StandardCharsets.UTF_8));
+        File scriptSh = new File(baseDir, "script.sh");
+        Files.write(scriptSh.toPath(), "#!/bin/sh\necho ok\n".getBytes(StandardCharsets.UTF_8));
+
+        Files.createSymbolicLink(new File(baseDir, "escape").toPath(), Paths.get("/sdcard"));
+        Files.createSymbolicLink(new File(baseDir, "dangling_escape").toPath(), Paths.get("/etc/nonexistent_saf_test"));
+        Files.createSymbolicLink(new File(notesDir, "rel_escape").toPath(), Paths.get("../../outside"));
+
+        try {
+            File resolvedRoot = DebianDocumentsProvider.resolveDocumentFile(baseDir, "home:");
+            check(resolvedRoot != null && resolvedRoot.getCanonicalPath().equals(baseDir.getCanonicalPath()),
+                "Root documentId must resolve to baseDir");
+
+            File resolvedPy = DebianDocumentsProvider.resolveDocumentFile(baseDir, "home:notes/hello.py");
+            check(resolvedPy != null && resolvedPy.getCanonicalPath().equals(helloPy.getCanonicalPath()),
+                "Nested path must resolve cleanly");
+
+            check(DebianDocumentsProvider.resolveDocumentFile(baseDir, "home:../etc/passwd") == null,
+                "Parent traversal must return null");
+            check(DebianDocumentsProvider.resolveDocumentFile(baseDir, "home:notes/../../etc") == null,
+                "Nested traversal must return null");
+            check(DebianDocumentsProvider.resolveDocumentFile(baseDir, "other:notes/hello.py") == null,
+                "Wrong prefix must return null");
+            check(DebianDocumentsProvider.resolveDocumentFile(baseDir, "home:/etc/passwd") == null,
+                "Absolute subpath must return null");
+            check(DebianDocumentsProvider.resolveDocumentFile(baseDir, "home:notes/") == null,
+                "Trailing slash subpath must return null");
+            check(DebianDocumentsProvider.resolveDocumentFile(baseDir, "home:escape") == null,
+                "External symlink to /sdcard must be blocked");
+            check(DebianDocumentsProvider.resolveDocumentFile(baseDir, "home:dangling_escape") == null,
+                "Dangling external symlink must be blocked");
+            check(DebianDocumentsProvider.resolveDocumentFile(baseDir, "home:notes/rel_escape") == null,
+                "Relative escaping symlink must be blocked");
+
+            check("home:notes/hello.py".equals(DebianDocumentsProvider.buildDocumentId(baseDir, helloPy)),
+                "buildDocumentId mismatch for nested file");
+            check(DebianDocumentsProvider.buildDocumentId(baseDir, new File(baseDir, "escape")) == null,
+                "buildDocumentId must reject external symlink");
+
+            check("vnd.android.document/directory".equals(DebianDocumentsProvider.guessMimeType(notesDir)),
+                "Directory MIME type mismatch");
+            check("text/x-python".equals(DebianDocumentsProvider.guessMimeType(helloPy)),
+                "Python MIME type mismatch");
+            check("text/x-shellscript".equals(DebianDocumentsProvider.guessMimeType(scriptSh)),
+                "Shell script MIME type mismatch");
+            check("application/octet-stream".equals(
+                DebianDocumentsProvider.guessMimeType(new File(baseDir, "blob.unknownext987"))),
+                "Unknown extension fallback MIME type mismatch");
+        } finally {
+            TarExtractor.deleteRecursivelyNoFollow(sandbox.toFile());
+        }
+
+        String manifest = new String(Files.readAllBytes(Paths.get("AndroidManifest.xml")), StandardCharsets.UTF_8);
+        check(manifest.contains("android:versionCode=\"8\"") && manifest.contains("android:versionName=\"2.3.0\""),
+            "AndroidManifest must bump versionCode=8 / versionName=2.3.0");
+        check(manifest.contains(".DebianDocumentsProvider")
+            && manifest.contains("com.debianchroot.term.documents")
+            && manifest.contains("android.permission.MANAGE_DOCUMENTS")
+            && manifest.contains("android.content.action.DOCUMENTS_PROVIDER"),
+            "AndroidManifest must register DebianDocumentsProvider with MANAGE_DOCUMENTS");
+
+        System.out.println("[PASS] Test 18: DocumentsProvider traversal/symlink safety, MIME types & Manifest");
+    }
+
+    private static void testBackupManagerTarGzRoundTrip() throws Exception {
+        Path sandbox = Files.createTempDirectory("debianterm-backup-test");
+        File srcDir = new File(sandbox.toFile(), "src");
+        File dstDir = new File(sandbox.toFile(), "dst");
+        File archive = new File(sandbox.toFile(), "backup-test.tar.gz");
+
+        try {
+            check(srcDir.mkdirs() && dstDir.mkdirs(), "Failed creating backup test dirs");
+            Files.write(new File(srcDir, "hello.txt").toPath(), "hola debian\n".getBytes(StandardCharsets.UTF_8));
+
+            File binDir = new File(srcDir, "bin");
+            check(binDir.mkdirs(), "Failed creating bin dir");
+            File runSh = new File(binDir, "run.sh");
+            Files.write(runSh.toPath(), "#!/bin/sh\necho ok\n".getBytes(StandardCharsets.UTF_8));
+            TarExtractor.setMode(runSh, 0755);
+
+            File emptyDir = new File(srcDir, "empty_dir");
+            check(emptyDir.mkdirs(), "Failed creating empty dir");
+
+            String longRel = "very_long_directory_segment_alpha_1234567890/"
+                + "very_long_directory_segment_beta_1234567890/nested/deep_pax_file_name_check.txt";
+            File longFile = new File(srcDir, longRel);
+            check(longFile.getParentFile().mkdirs(), "Failed creating PAX deep dir");
+            String paxPayload = "pax-ok-ñ-🚀";
+            Files.write(longFile.toPath(), paxPayload.getBytes(StandardCharsets.UTF_8));
+
+            Files.createSymbolicLink(new File(srcDir, "link_hello").toPath(), Paths.get("hello.txt"));
+            Files.createSymbolicLink(new File(srcDir, "ext_storage_link").toPath(), Paths.get("/sdcard/Download"));
+
+            File storageDir = new File(srcDir, "storage");
+            File devDir = new File(srcDir, "dev");
+            check(storageDir.mkdirs() && devDir.mkdirs(), "Failed creating excluded dirs");
+            Files.createSymbolicLink(new File(storageDir, "shared").toPath(), Paths.get("/sdcard"));
+            Files.write(new File(devDir, "dummy").toPath(), "skip".getBytes(StandardCharsets.UTF_8));
+
+            Properties props = new Properties();
+            props.setProperty("color_scheme", "catppuccin");
+            props.setProperty("font_id", "nerd_meslo");
+            props.setProperty("custom_extra_keys_v1", ExtraKeysBarView.PRESET_PROGRAMMING);
+            byte[] metaBytes = TerminalSettings.serializePropertiesMap(props);
+
+            BackupManager.BackupResult bres = BackupManager.createTarGz(
+                srcDir,
+                archive,
+                BackupManager.META_ENTRY_NAME,
+                metaBytes,
+                new HashSet<>(Arrays.asList("storage", "dev")),
+                null,
+                null
+            );
+            check(bres.success && archive.isFile() && bres.archiveBytes > 0 && bres.entriesCount >= 5,
+                "BackupManager.createTarGz failed: " + bres.message);
+
+            BackupManager.RestoreResult rres = BackupManager.restoreTarGz(archive, dstDir, null, null);
+            check(rres.success && rres.entriesCount >= 5,
+                "BackupManager.restoreTarGz failed: " + rres.message);
+
+            String restoredHello = new String(Files.readAllBytes(new File(dstDir, "hello.txt").toPath()), StandardCharsets.UTF_8);
+            check("hola debian\n".equals(restoredHello), "Restored hello.txt mismatch");
+
+            File restoredRun = new File(dstDir, "bin/run.sh");
+            check(restoredRun.isFile() && restoredRun.canExecute(), "Restored bin/run.sh must remain executable");
+
+            File restoredLong = new File(dstDir, longRel);
+            check(restoredLong.isFile(), "PAX deep file (>115 chars) missing after restore");
+            String restoredPaxPayload = new String(Files.readAllBytes(restoredLong.toPath()), StandardCharsets.UTF_8);
+            check(paxPayload.equals(restoredPaxPayload), "PAX deep UTF-8 payload mismatch");
+
+            check(new File(dstDir, "empty_dir").isDirectory(), "Empty directory missing after restore");
+
+            Path restoredSym = new File(dstDir, "link_hello").toPath();
+            check(Files.isSymbolicLink(restoredSym) && "hello.txt".equals(Files.readSymbolicLink(restoredSym).toString()),
+                "Internal symlink mismatch after restore");
+
+            check(!new File(dstDir, "ext_storage_link").exists() && !Files.isSymbolicLink(new File(dstDir, "ext_storage_link").toPath()),
+                "External /sdcard symlink must be excluded from backup");
+            check(!new File(dstDir, "storage").exists() && !new File(dstDir, "dev").exists(),
+                "Top-level excluded dirs (storage, dev) must not appear in restored tree");
+
+            check(rres.metadataBytes != null && rres.metadataBytes.length > 0, "Metadata bytes must be extracted");
+            Properties restoredProps = TerminalSettings.deserializePropertiesMap(rres.metadataBytes);
+            check("catppuccin".equals(restoredProps.getProperty("color_scheme"))
+                && "nerd_meslo".equals(restoredProps.getProperty("font_id"))
+                && ExtraKeysBarView.PRESET_PROGRAMMING.equals(restoredProps.getProperty("custom_extra_keys_v1")),
+                "Restored settings metadata mismatch");
+            check(!new File(dstDir, BackupManager.META_ENTRY_NAME).exists(),
+                "Temporary metadata properties file must be cleaned from targetDir");
+        } finally {
+            TarExtractor.deleteRecursivelyNoFollow(sandbox.toFile());
+        }
+
+        System.out.println("[PASS] Test 19: BackupManager .tar.gz round-trip (perms, PAX >115c, symlinks, exclusions, metadata)");
+    }
+
+    private static void testExtraKeysCustomSpecAndFonts() throws Exception {
+        List<List<ExtraKeysBarView.KeySpec>> std = ExtraKeysBarView.parseCustomSpec(ExtraKeysBarView.PRESET_STANDARD);
+        check(std.size() == 2 && std.get(0).size() == 7 && std.get(1).size() == 7,
+            "Standard preset must parse into 2 rows x 7 keys");
+        check("ESC".equals(std.get(0).get(0).code) && "~".equals(std.get(0).get(0).altCode),
+            "First standard key must be ESC:~");
+        check(std.get(0).get(4).repeatable && "▲".equals(std.get(0).get(4).label),
+            "UP key must be repeatable with ▲ label");
+        check(std.get(1).get(1).isModifier && "CTRL".equals(std.get(1).get(1).code),
+            "CTRL must be marked isModifier");
+
+        List<List<ExtraKeysBarView.KeySpec>> prog = ExtraKeysBarView.parseCustomSpec(ExtraKeysBarView.PRESET_PROGRAMMING);
+        check(prog.size() == 2 && "{".equals(prog.get(0).get(3).code) && "[".equals(prog.get(0).get(3).altCode)
+            && "ENTER".equals(prog.get(1).get(6).code),
+            "Programming preset mismatch");
+
+        List<List<ExtraKeysBarView.KeySpec>> vim = ExtraKeysBarView.parseCustomSpec(ExtraKeysBarView.PRESET_TMUX_VIM);
+        check(vim.size() == 2 && ":".equals(vim.get(0).get(1).code) && "BKSP".equals(vim.get(1).get(6).code)
+            && vim.get(1).get(6).repeatable && "⌫".equals(vim.get(1).get(6).label),
+            "Tmux/Vim preset mismatch");
+
+        List<List<ExtraKeysBarView.KeySpec>> custom = ExtraKeysBarView.parseCustomSpec("ESC:~, /:|, (:)\nCTRL, ALT");
+        check(custom.size() == 2 && custom.get(0).size() == 3 && custom.get(1).size() == 2
+            && "(".equals(custom.get(0).get(2).code) && ")".equals(custom.get(0).get(2).altCode),
+            "Custom spec parse mismatch");
+
+        List<List<ExtraKeysBarView.KeySpec>> fallback = ExtraKeysBarView.parseCustomSpec("   \n  ");
+        check(fallback.size() == 2 && fallback.get(0).size() == 7,
+            "Empty spec must fallback to standard preset");
+
+        Path fontPath = Paths.get("assets/fonts/MesloLGS_NF_Regular.ttf");
+        check(Files.isRegularFile(fontPath) && Files.size(fontPath) > 1000000L,
+            "Bundled Nerd Font must exist and exceed 1 MB");
+        byte[] allFontBytes = Files.readAllBytes(fontPath);
+        check(allFontBytes.length >= 4
+            && allFontBytes[0] == 0x00 && allFontBytes[1] == 0x01
+            && allFontBytes[2] == 0x00 && allFontBytes[3] == 0x00,
+            "Bundled Nerd Font must start with valid TTF header 00 01 00 00");
+
+        check(Modifier.isPublic(TerminalSettings.class.getMethod("getFontId").getModifiers()),
+            "TerminalSettings.getFontId must be public");
+        check(Modifier.isPublic(TerminalSettings.class.getMethod("setFontId", String.class).getModifiers()),
+            "TerminalSettings.setFontId must be public");
+        check(Modifier.isPublic(TerminalSettings.class.getMethod("getCustomExtraKeysSpec").getModifiers()),
+            "TerminalSettings.getCustomExtraKeysSpec must be public");
+        check(Modifier.isPublic(TerminalSettings.class.getMethod("setCustomExtraKeysSpec", String.class).getModifiers()),
+            "TerminalSettings.setCustomExtraKeysSpec must be public");
+        check(Modifier.isPublic(TerminalSettings.class.getMethod("isMaterialYouEnabled").getModifiers()),
+            "TerminalSettings.isMaterialYouEnabled must be public");
+        check(Modifier.isPublic(TerminalSettings.class.getMethod("setMaterialYouEnabled", boolean.class).getModifiers()),
+            "TerminalSettings.setMaterialYouEnabled must be public");
+        check(Modifier.isPublic(TerminalSettings.class.getMethod("exportMetadataBytes").getModifiers()),
+            "TerminalSettings.exportMetadataBytes must be public");
+        check(Modifier.isPublic(TerminalSettings.class.getMethod("importMetadataBytes", byte[].class).getModifiers()),
+            "TerminalSettings.importMetadataBytes must be public");
+        check(Modifier.isPublic(ExtraKeysBarView.class.getMethod("setCustomSpec", String.class).getModifiers()),
+            "ExtraKeysBarView.setCustomSpec must be public");
+        check(Modifier.isPublic(ExtraKeysBarView.class.getMethod("setAccentColor", int.class).getModifiers()),
+            "ExtraKeysBarView.setAccentColor must be public");
+        check(Modifier.isPublic(ExtraKeysBarView.class.getMethod("setBarSurfaceColor", int.class).getModifiers()),
+            "ExtraKeysBarView.setBarSurfaceColor must be public");
+        check(Modifier.isPublic(BackupManager.class.getMethod("backupRootHome", String.class, File.class).getModifiers()),
+            "BackupManager.backupRootHome must be public");
+
+        System.out.println("[PASS] Test 20: ExtraKeys custom spec/presets, bundled Nerd Font TTF & Phase 2 API");
     }
 
     private static String fetchText(String urlStr) throws Exception {

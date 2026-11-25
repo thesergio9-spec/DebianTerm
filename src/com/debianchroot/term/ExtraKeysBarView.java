@@ -14,9 +14,14 @@ import android.view.View;
 import android.widget.GridLayout;
 import android.widget.TextView;
 
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Locale;
+
 /**
  * Termux-style extra keys toolbar with CTRL/ALT latch + lock, long-press alternates,
- * key auto-repeat on navigation keys, and full/compact/hidden layout modes.
+ * key auto-repeat on navigation keys, full/compact/hidden layout modes, presets & custom specs.
  */
 public final class ExtraKeysBarView extends GridLayout {
 
@@ -32,15 +37,15 @@ public final class ExtraKeysBarView extends GridLayout {
         LOCKED
     }
 
-    private static final class KeySpec {
-        final String label;
-        final String code;
-        final String altLabel;
-        final String altCode;
-        final boolean repeatable;
-        final boolean isModifier;
+    public static final class KeySpec {
+        public final String label;
+        public final String code;
+        public final String altLabel;
+        public final String altCode;
+        public final boolean repeatable;
+        public final boolean isModifier;
 
-        KeySpec(String label, String code, String altLabel, String altCode, boolean repeatable, boolean isModifier) {
+        public KeySpec(String label, String code, String altLabel, String altCode, boolean repeatable, boolean isModifier) {
             this.label = label;
             this.code = code;
             this.altLabel = altLabel;
@@ -50,23 +55,14 @@ public final class ExtraKeysBarView extends GridLayout {
         }
     }
 
-    private static final KeySpec[] FULL_KEYS = {
-        new KeySpec("ESC", "ESC", "~", "~", false, false),
-        new KeySpec("/", "/", "|", "|", false, false),
-        new KeySpec("-", "-", "_", "_", false, false),
-        new KeySpec("HOME", "HOME", null, null, false, false),
-        new KeySpec("▲", "UP", null, null, true, false),
-        new KeySpec("END", "END", null, null, false, false),
-        new KeySpec("PGUP", "PGUP", null, null, true, false),
+    public static final String PRESET_STANDARD =
+        "ESC:~, /:|, -:_, HOME, UP, END, PGUP\nTAB:BACKTAB, CTRL, ALT, LEFT, DOWN, RIGHT, PGDN";
 
-        new KeySpec("TAB", "TAB", "S-TAB", "BACKTAB", false, false),
-        new KeySpec("CTRL", "CTRL", null, null, false, true),
-        new KeySpec("ALT", "ALT", null, null, false, true),
-        new KeySpec("◄", "LEFT", null, null, true, false),
-        new KeySpec("▼", "DOWN", null, null, true, false),
-        new KeySpec("►", "RIGHT", null, null, true, false),
-        new KeySpec("PGDN", "PGDN", null, null, true, false)
-    };
+    public static final String PRESET_PROGRAMMING =
+        "ESC:~, /:|, -:_, {:[, }:], =:+, $:;\nTAB:BACKTAB, CTRL, ALT, LEFT, DOWN, RIGHT, ENTER";
+
+    public static final String PRESET_TMUX_VIM =
+        "ESC, COLON, /:|, -:_, HOME, UP, END\nTAB:BACKTAB, CTRL, ALT, LEFT, DOWN, RIGHT, BKSP";
 
     private static final KeySpec[] COMPACT_KEYS = {
         new KeySpec("ESC", "ESC", "~", "~", false, false),
@@ -83,6 +79,7 @@ public final class ExtraKeysBarView extends GridLayout {
     private Listener mListener;
     private boolean mHapticEnabled = true;
     private String mMode = TerminalSettings.EXTRA_KEYS_FULL;
+    private String mCustomSpec = PRESET_STANDARD;
 
     private ModState mCtrlState = ModState.OFF;
     private ModState mAltState = ModState.OFF;
@@ -102,6 +99,7 @@ public final class ExtraKeysBarView extends GridLayout {
     private int mTextColor = Color.parseColor("#E6EDF3");
     private int mSubTextColor = Color.parseColor("#8B949E");
     private int mAccentColor = Color.parseColor("#D70A53");
+    private int mAccentLatchedColor = Color.parseColor("#A3083F");
 
     public ExtraKeysBarView(Context context) {
         super(context);
@@ -109,6 +107,142 @@ public final class ExtraKeysBarView extends GridLayout {
         int pad = dp(2);
         setPadding(pad, pad, pad, pad);
         rebuildButtons();
+    }
+
+    /**
+     * Parses a 1-to-2 row extra-keys specification string into structured KeySpec rows.
+     * Supports KEY:ALT syntax, commas/spaces separators, and aliases (COLON, ENTER, BKSP, etc.).
+     */
+    public static List<List<KeySpec>> parseCustomSpec(String raw) {
+        String source = (raw == null || raw.trim().isEmpty()) ? PRESET_STANDARD : raw;
+        List<List<KeySpec>> rows = new ArrayList<>();
+        String[] lines = source.split("\\r?\\n");
+        for (String rawLine : lines) {
+            if (rows.size() >= 2) break;
+            String line = rawLine.trim();
+            if (line.isEmpty()) continue;
+
+            String[] tokens = line.split("[,\\s]+");
+            List<KeySpec> row = new ArrayList<>();
+            for (String rawTok : tokens) {
+                if (row.size() >= 10) break;
+                String tok = rawTok.trim();
+                if (tok.isEmpty()) continue;
+
+                String primaryTok = tok;
+                String altTok = null;
+                int sepIdx = tok.indexOf(':');
+                if (tok.length() >= 3 && sepIdx > 0 && sepIdx < tok.length() - 1) {
+                    primaryTok = tok.substring(0, sepIdx).trim();
+                    altTok = tok.substring(sepIdx + 1).trim();
+                    if (altTok.isEmpty()) altTok = null;
+                }
+
+                String code = resolveKeyCode(primaryTok);
+                if (code == null || code.isEmpty()) continue;
+                String label = labelForCode(code);
+
+                boolean isMod = "CTRL".equals(code) || "ALT".equals(code);
+                boolean repeatable = !isMod && isRepeatableCode(code);
+
+                String altCode = (!isMod && altTok != null) ? resolveKeyCode(altTok) : null;
+                String altLabel = (altCode != null && !altCode.isEmpty()) ? labelForCode(altCode) : null;
+                if (altLabel == null) altCode = null;
+
+                row.add(new KeySpec(label, code, altLabel, altCode, repeatable, isMod));
+            }
+            if (!row.isEmpty()) {
+                rows.add(row);
+            }
+        }
+        if (rows.isEmpty() && !PRESET_STANDARD.equals(source)) {
+            return parseCustomSpec(PRESET_STANDARD);
+        }
+        return rows;
+    }
+
+    private static String resolveKeyCode(String rawTok) {
+        if (rawTok == null || rawTok.isEmpty()) return null;
+        String upper = rawTok.toUpperCase(Locale.US);
+        switch (upper) {
+            case "ESCAPE":
+            case "ESC":
+                return "ESC";
+            case "TAB":
+                return "TAB";
+            case "BACKTAB":
+            case "S-TAB":
+            case "STAB":
+                return "BACKTAB";
+            case "CTRL":
+                return "CTRL";
+            case "ALT":
+                return "ALT";
+            case "HOME":
+                return "HOME";
+            case "END":
+                return "END";
+            case "PGUP":
+            case "PAGEUP":
+                return "PGUP";
+            case "PGDN":
+            case "PAGEDOWN":
+                return "PGDN";
+            case "UP":
+            case "▲":
+                return "UP";
+            case "DOWN":
+            case "▼":
+                return "DOWN";
+            case "LEFT":
+            case "◄":
+                return "LEFT";
+            case "RIGHT":
+            case "►":
+                return "RIGHT";
+            case "ENTER":
+            case "RETURN":
+            case "↵":
+                return "ENTER";
+            case "BKSP":
+            case "BACKSPACE":
+            case "DEL":
+            case "⌫":
+                return "BKSP";
+            case "COLON":
+                return ":";
+            case "COMMA":
+                return ",";
+            case "PIPE":
+                return "|";
+            case "SPACE":
+            case "SPC":
+                return " ";
+            default:
+                return rawTok.length() == 1 ? rawTok : upper;
+        }
+    }
+
+    private static String labelForCode(String code) {
+        if ("UP".equals(code)) return "▲";
+        if ("DOWN".equals(code)) return "▼";
+        if ("LEFT".equals(code)) return "◄";
+        if ("RIGHT".equals(code)) return "►";
+        if ("BACKTAB".equals(code)) return "S-TAB";
+        if ("ENTER".equals(code)) return "↵";
+        if ("BKSP".equals(code)) return "⌫";
+        if (" ".equals(code)) return "SPC";
+        return code;
+    }
+
+    private static boolean isRepeatableCode(String code) {
+        return "UP".equals(code)
+            || "DOWN".equals(code)
+            || "LEFT".equals(code)
+            || "RIGHT".equals(code)
+            || "PGUP".equals(code)
+            || "PGDN".equals(code)
+            || "BKSP".equals(code);
     }
 
     @Override
@@ -140,12 +274,10 @@ public final class ExtraKeysBarView extends GridLayout {
             }
         }
         if ((action == MotionEvent.ACTION_MOVE || action == MotionEvent.ACTION_UP) && mSwipeTriggered) {
-            if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_MOVE) {
-                if (mListener != null) {
-                    mListener.onSwipeToTextInput();
-                }
-                mSwipeTriggered = false;
+            if (mListener != null) {
+                mListener.onSwipeToTextInput();
             }
+            mSwipeTriggered = false;
             return true;
         }
         return super.onTouchEvent(ev);
@@ -157,6 +289,32 @@ public final class ExtraKeysBarView extends GridLayout {
 
     public void setHapticEnabled(boolean enabled) {
         mHapticEnabled = enabled;
+    }
+
+    public void setCustomSpec(String spec) {
+        mCustomSpec = (spec == null || spec.trim().isEmpty()) ? PRESET_STANDARD : spec;
+        if (!TerminalSettings.EXTRA_KEYS_HIDDEN.equals(mMode)
+            && !TerminalSettings.EXTRA_KEYS_COMPACT.equals(mMode)) {
+            rebuildButtons();
+        }
+    }
+
+    public void setAccentColor(int color) {
+        mAccentColor = color;
+        mAccentLatchedColor = darkenColor(color, 0.78f);
+        refreshModifierVisuals();
+    }
+
+    public void setBarSurfaceColor(int bgColor) {
+        mBgColor = bgColor;
+        setBackgroundColor(mBgColor);
+    }
+
+    private static int darkenColor(int color, float factor) {
+        int r = Math.max(0, Math.min(255, Math.round(Color.red(color) * factor)));
+        int g = Math.max(0, Math.min(255, Math.round(Color.green(color) * factor)));
+        int b = Math.max(0, Math.min(255, Math.round(Color.blue(color) * factor)));
+        return Color.rgb(r, g, b);
     }
 
     public void applyTheme(boolean light) {
@@ -215,47 +373,65 @@ public final class ExtraKeysBarView extends GridLayout {
         mAltView = null;
 
         boolean compact = TerminalSettings.EXTRA_KEYS_COMPACT.equals(mMode);
-        KeySpec[] specs = compact ? COMPACT_KEYS : FULL_KEYS;
-        int cols = compact ? 8 : 7;
-        int rows = compact ? 1 : 2;
-        setColumnCount(cols);
-        setRowCount(rows);
+        List<List<KeySpec>> rows;
+        int maxCols;
 
-        int btnHeight = dp(compact ? 38 : 34);
+        if (compact) {
+            List<KeySpec> compactList = new ArrayList<>(COMPACT_KEYS.length);
+            Collections.addAll(compactList, COMPACT_KEYS);
+            rows = Collections.singletonList(compactList);
+            maxCols = COMPACT_KEYS.length;
+        } else {
+            rows = parseCustomSpec(mCustomSpec);
+            maxCols = 1;
+            for (List<KeySpec> r : rows) {
+                if (r.size() > maxCols) maxCols = r.size();
+            }
+        }
+
+        setColumnCount(maxCols);
+        setRowCount(rows.size());
+
+        int btnHeight = dp(compact ? 38 : (rows.size() == 1 ? 38 : 34));
         int margin = dp(2);
+        float textSp = compact ? 12f : (maxCols >= 9 ? 10f : 11.5f);
 
-        for (int i = 0; i < specs.length; i++) {
-            final KeySpec spec = specs[i];
-            int r = i / cols;
-            int c = i % cols;
+        for (int r = 0; r < rows.size(); r++) {
+            List<KeySpec> rowSpecs = rows.get(r);
+            for (int c = 0; c < rowSpecs.size(); c++) {
+                final KeySpec spec = rowSpecs.get(c);
+                int colSpan = (c == rowSpecs.size() - 1 && rowSpecs.size() < maxCols)
+                    ? (maxCols - c)
+                    : 1;
 
-            TextView btn = new TextView(getContext());
-            btn.setGravity(Gravity.CENTER);
-            btn.setTextSize(TypedValue.COMPLEX_UNIT_SP, compact ? 12 : 11.5f);
-            btn.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
-            btn.setSingleLine(true);
-            btn.setTextColor(mTextColor);
-            if (spec.altLabel != null) {
-                btn.setText(spec.label + "·" + spec.altLabel);
-            } else {
-                btn.setText(spec.label);
+                TextView btn = new TextView(getContext());
+                btn.setGravity(Gravity.CENTER);
+                btn.setTextSize(TypedValue.COMPLEX_UNIT_SP, textSp);
+                btn.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+                btn.setSingleLine(true);
+                btn.setTextColor(mTextColor);
+                if (spec.altLabel != null) {
+                    btn.setText(spec.label + "·" + spec.altLabel);
+                } else {
+                    btn.setText(spec.label);
+                }
+                btn.setBackground(makeRoundedBg(mBtnColor));
+
+                LayoutParams lp = new LayoutParams(spec(r, 1f), spec(c, colSpan, (float) colSpan));
+                lp.width = 0;
+                lp.height = btnHeight;
+                lp.setMargins(margin, margin, margin, margin);
+                btn.setLayoutParams(lp);
+
+                if ("CTRL".equals(spec.code)) {
+                    mCtrlView = btn;
+                } else if ("ALT".equals(spec.code)) {
+                    mAltView = btn;
+                }
+
+                attachTouchBehavior(btn, spec);
+                addView(btn);
             }
-            btn.setBackground(makeRoundedBg(mBtnColor));
-
-            LayoutParams lp = new LayoutParams(spec(r, 1f), spec(c, 1f));
-            lp.width = 0;
-            lp.height = btnHeight;
-            lp.setMargins(margin, margin, margin, margin);
-            btn.setLayoutParams(lp);
-
-            if ("CTRL".equals(spec.code)) {
-                mCtrlView = btn;
-            } else if ("ALT".equals(spec.code)) {
-                mAltView = btn;
-            }
-
-            attachTouchBehavior(btn, spec);
-            addView(btn);
         }
         refreshModifierVisuals();
     }
@@ -391,7 +567,7 @@ public final class ExtraKeysBarView extends GridLayout {
         } else if (state == ModState.LATCHED) {
             view.setText(baseLabel);
             view.setTextColor(Color.WHITE);
-            view.setBackground(makeRoundedBg(Color.parseColor("#A3083F")));
+            view.setBackground(makeRoundedBg(mAccentLatchedColor));
         } else {
             view.setText(baseLabel);
             view.setTextColor(mTextColor);

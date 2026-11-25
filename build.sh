@@ -10,6 +10,7 @@ ANNOTATION_JAR="$ROOT_DIR/libs/annotation-1.5.0.jar"
 XZ_JAR="$ROOT_DIR/libs/xz-1.9.jar"
 
 for f in "$ANDROID_JAR" "$D8_JAR" "$ANNOTATION_JAR" "$XZ_JAR" \
+         "$ROOT_DIR/assets/fonts/MesloLGS_NF_Regular.ttf" \
          "$ROOT_DIR/jniLibs/arm64-v8a/libtermux.so" \
          "$ROOT_DIR/jniLibs/arm64-v8a/libproot.so" \
          "$ROOT_DIR/jniLibs/arm64-v8a/libproot_loader.so" \
@@ -30,8 +31,13 @@ mkdir -p build/gen build/classes build/dex
 
 echo "[2/7] Compilando recursos con aapt2..."
 aapt2 compile --dir res -o build/res.zip
+ASSETS_ARG=""
+if [ -d assets ]; then
+  ASSETS_ARG="-A assets"
+fi
 aapt2 link \
   -I "$ANDROID_JAR" \
+  $ASSETS_ARG \
   --manifest AndroidManifest.xml \
   --extra-packages com.termux.view \
   --java build/gen \

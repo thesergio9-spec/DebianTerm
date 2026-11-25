@@ -17,6 +17,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.IBinder;
+import android.provider.DocumentsContract;
 import android.provider.Settings;
 import android.text.Editable;
 import android.text.InputType;
@@ -56,11 +57,17 @@ import com.termux.terminal.TerminalSessionClient;
 import com.termux.view.TerminalView;
 import com.termux.view.TerminalViewClient;
 
+import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Date;
 import java.util.List;
+import java.util.Locale;
 import java.util.Properties;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -85,6 +92,9 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
     private static final String PERM_POST_NOTIFICATIONS = "android.permission.POST_NOTIFICATIONS";
     private static final int REQ_POST_NOTIFICATIONS = 2001;
     private static final int REQ_STORAGE_PERMISSION = 2002;
+    private static final int REQ_PICK_FONT = 2004;
+    private static final int REQ_PICK_BACKUP = 2005;
+    private static final String CUSTOM_FONT_FILE_NAME = "custom_font.ttf";
 
     private final ExecutorService mBgExecutor = Executors.newSingleThreadExecutor();
 
@@ -178,6 +188,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
     private boolean mNotifPromptedThisRun = false;
     private SystemRequirements.Report mLastReport = new SystemRequirements.Report(Collections.emptyList());
     private String mPendingContextUrl = null;
+    private int mActiveAccentColor = Color.parseColor("#D70A53");
 
     private final ServiceConnection mServiceConnection = new ServiceConnection() {
         @Override
@@ -253,9 +264,10 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         mTerminalView.setTerminalViewClient(this);
         mTerminalView.setSoftKeyboardPansMainScreen(mSettings.isSoftKeyboardPanMainScreen());
         mTerminalView.setTextSize(mSettings.getFontSizePx());
-        mTerminalView.setTypeface(Typeface.MONOSPACE);
+        applyTerminalFont();
         registerForContextMenu(mTerminalView);
 
+        mExtraKeys.setCustomSpec(mSettings.getCustomExtraKeysSpec());
         applyColorScheme(mSettings.getColorSchemeId());
         applyExtraKeysMode(mSettings.getExtraKeysMode(), false);
         mExtraKeys.setHapticEnabled(mSettings.isHapticEnabled());
@@ -323,6 +335,20 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
                 Toast.makeText(this, "Permiso de almacenamiento denegado.", Toast.LENGTH_LONG).show();
                 runRequirementsCheckAsync(false);
             }
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (resultCode != RESULT_OK || data == null || data.getData() == null) {
+            return;
+        }
+        final Uri uri = data.getData();
+        if (requestCode == REQ_PICK_FONT) {
+            handleCustomFontPicked(uri);
+        } else if (requestCode == REQ_PICK_BACKUP) {
+            showRestoreTargetChooser(null, uri);
         }
     }
 
@@ -1276,6 +1302,10 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
             mDrawerLayout.closeDrawer();
             showSnippetsDialog();
         }));
+        actions.addView(makeDrawerActionButton("💾 Respaldo y Restauración", "#21262D", v -> {
+            mDrawerLayout.closeDrawer();
+            showBackupRestoreDialog();
+        }));
         actions.addView(makeDrawerActionButton("Panel de Inicio y Requisitos", "#1F6FEB", v -> {
             mDrawerLayout.closeDrawer();
             showDashboardView();
@@ -1819,7 +1849,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
             row.setBackgroundColor(active ? Color.parseColor("#21262D") : Color.TRANSPARENT);
 
             View indicator = new View(this);
-            indicator.setBackgroundColor(active ? Color.parseColor("#D70A53") : Color.TRANSPARENT);
+            indicator.setBackgroundColor(active ? mActiveAccentColor : Color.TRANSPARENT);
             row.addView(indicator, new LinearLayout.LayoutParams(dp(4), dp(24)));
 
             TextView nameTv = new TextView(this);
@@ -2499,7 +2529,8 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
                     "Abrir sesión Debian (Root)",
                     "Abrir Shell Android (su)",
                     "Desmontar montajes del chroot",
-                    "Regenerar script " + fScript + " (con backup)"
+                    "Regenerar script " + fScript + " (con backup)",
+                    "Respaldar /root (Chroot) a .tar.gz"
                 };
                 new AlertDialog.Builder(MainActivity.this)
                     .setTitle("Acciones Chroot Root")
@@ -2545,6 +2576,9 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
                                         Toast.LENGTH_LONG).show();
                                 });
                             });
+                        } else if (idx == 5) {
+                            dialog.dismiss();
+                            runRootHomeBackupTask(fChroot);
                         }
                     })
                     .show();
@@ -2633,6 +2667,8 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
                 neutralBtn.setOnClickListener(v -> {
                     String[] opts = {
                         "Abrir sesión Debian 12 (Sin Root)",
+                        "Abrir /root en Gestor de Archivos (SAF)",
+                        "Respaldo y Restauración (.tar.gz)",
                         "Configurar almacenamiento (setup-storage)",
                         "Regenerar script lanzador PRoot",
                         "Desinstalar Debian 12 PRoot"
@@ -2645,8 +2681,14 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
                                 openNewProotDebianSession();
                             } else if (idx == 1) {
                                 dialog.dismiss();
-                                runSetupStorageFlow();
+                                openDocumentsProvider();
                             } else if (idx == 2) {
+                                dialog.dismiss();
+                                showBackupRestoreDialog();
+                            } else if (idx == 3) {
+                                dialog.dismiss();
+                                runSetupStorageFlow();
+                            } else if (idx == 4) {
                                 mBgExecutor.execute(() -> {
                                     try {
                                         File rootfs = ProotManager.getRootfsDir(MainActivity.this);
@@ -2662,7 +2704,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
                                             MainActivity.this, "Error: " + e.getMessage(), Toast.LENGTH_LONG).show());
                                     }
                                 });
-                            } else if (idx == 3) {
+                            } else if (idx == 5) {
                                 new AlertDialog.Builder(MainActivity.this)
                                     .setTitle("Desinstalar Debian 12 (Sin Root)")
                                     .setMessage("Se borrarán los archivos del entorno PRoot interno. No afecta ningún chroot con root.")
@@ -2865,6 +2907,44 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         fontRow.addView(incBtn);
         content.addView(fontRow);
 
+        // 2b. Font family (Nerd Font / System / Custom .ttf)
+        TextView typefaceHeader = new TextView(this);
+        typefaceHeader.setText("Tipografía de terminal (Nerd Font):");
+        typefaceHeader.setTypeface(Typeface.DEFAULT_BOLD);
+        typefaceHeader.setPadding(0, 0, 0, dp(4));
+        content.addView(typefaceHeader);
+
+        RadioGroup fontGroup = new RadioGroup(this);
+        String currentFont = mSettings.getFontId();
+        for (int i = 0; i < TerminalSettings.ALL_FONT_IDS.length; i++) {
+            final String fid = TerminalSettings.ALL_FONT_IDS[i];
+            RadioButton rb = new RadioButton(this);
+            rb.setText(TerminalSettings.ALL_FONT_NAMES[i]);
+            rb.setId(View.generateViewId());
+            fontGroup.addView(rb);
+            if (fid.equals(currentFont)) {
+                rb.setChecked(true);
+            }
+            rb.setOnClickListener(v -> {
+                if (TerminalSettings.FONT_CUSTOM.equals(fid)
+                    && !new File(getFilesDir(), CUSTOM_FONT_FILE_NAME).isFile()) {
+                    Toast.makeText(this, "Selecciona un archivo .ttf o .otf para usar fuente personalizada.", Toast.LENGTH_SHORT).show();
+                    launchCustomFontPicker();
+                    return;
+                }
+                mSettings.setFontId(fid);
+                applyTerminalFont();
+            });
+        }
+        content.addView(fontGroup);
+
+        final Button importFontBtn = makeActionButton("📂 Importar fuente (.ttf / .otf)", "#21262D", null);
+        importFontBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        LinearLayout.LayoutParams fontImpLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        fontImpLp.setMargins(0, dp(4), 0, dp(12));
+        content.addView(importFontBtn, fontImpLp);
+
         // 3. Color scheme selector
         TextView schemeHeader = new TextView(this);
         schemeHeader.setText("Esquema de colores:");
@@ -2889,6 +2969,20 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
             });
         }
         content.addView(schemeGroup);
+
+        Switch matYouSwitch = new Switch(this);
+        boolean supportsMonet = Build.VERSION.SDK_INT >= 31;
+        matYouSwitch.setText(supportsMonet
+            ? "🎨 Tema dinámico Material You (Android 12+)"
+            : "🎨 Tema dinámico Material You (Requiere Android 12+)");
+        matYouSwitch.setPadding(0, dp(8), 0, dp(4));
+        matYouSwitch.setEnabled(supportsMonet);
+        matYouSwitch.setChecked(supportsMonet && mSettings.isMaterialYouEnabled());
+        matYouSwitch.setOnCheckedChangeListener((btn, isChecked) -> {
+            mSettings.setMaterialYouEnabled(isChecked);
+            applyMaterialYouTheme();
+        });
+        content.addView(matYouSwitch);
 
         // 4. Extra keys bar mode
         TextView keysHeader = new TextView(this);
@@ -2924,6 +3018,13 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
             });
         }
         content.addView(keysGroup);
+
+        final Button editKeysBtn = makeActionButton("⌨ Editor visual y presets de teclas extra", "#21262D", null);
+        editKeysBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        LinearLayout.LayoutParams editKeysLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        editKeysLp.setMargins(0, dp(6), 0, dp(4));
+        content.addView(editKeysBtn, editKeysLp);
 
         // 5. Haptic feedback toggle
         Switch hapticSwitch = new Switch(this);
@@ -3008,14 +3109,54 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
             content.addView(phantomBtn, phLp);
         }
 
+        // 7. Archivos SAF & Respaldos
+        TextView dataHeader = new TextView(this);
+        dataHeader.setText("Archivos (SAF) y Respaldos:");
+        dataHeader.setTypeface(Typeface.DEFAULT_BOLD);
+        dataHeader.setPadding(0, dp(14), 0, dp(4));
+        content.addView(dataHeader);
+
+        Button safBtn = makeActionButton(
+            "📂 Abrir /root en Gestor de Archivos (SAF)",
+            "#1F6FEB",
+            v -> openDocumentsProvider()
+        );
+        safBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        LinearLayout.LayoutParams safLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        safLp.setMargins(0, dp(4), 0, 0);
+        content.addView(safBtn, safLp);
+
+        final Button backupBtn = makeActionButton("💾 Respaldo y Restauración (.tar.gz)", "#238636", null);
+        backupBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        LinearLayout.LayoutParams bakLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        bakLp.setMargins(0, dp(6), 0, 0);
+        content.addView(backupBtn, bakLp);
+
         ScrollView scroll = new ScrollView(this);
         scroll.addView(content);
 
-        new AlertDialog.Builder(this)
+        final AlertDialog settingsDlg = new AlertDialog.Builder(this)
             .setTitle("Ajustes rápidos")
             .setView(scroll)
             .setPositiveButton("Listo", null)
-            .show();
+            .create();
+
+        importFontBtn.setOnClickListener(v -> {
+            settingsDlg.dismiss();
+            launchCustomFontPicker();
+        });
+        editKeysBtn.setOnClickListener(v -> {
+            settingsDlg.dismiss();
+            showExtraKeysEditorDialog();
+        });
+        backupBtn.setOnClickListener(v -> {
+            settingsDlg.dismiss();
+            showBackupRestoreDialog();
+        });
+
+        settingsDlg.show();
     }
 
     private void applyColorScheme(String schemeId) {
@@ -3033,6 +3174,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         mTerminalView.setBackgroundColor(bgColor);
         mTerminalView.invalidate();
         mExtraKeys.applyTheme(TerminalSettings.isLightScheme(schemeId));
+        applyMaterialYouTheme();
     }
 
     private void applyExtraKeysMode(String mode, boolean notifyGeometry) {
@@ -3563,6 +3705,744 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
     }
 
     // -------------------------------------------------------------------------
+    // Phase 2: Fonts, Material You, Extra Keys Visual Editor, SAF & Backups
+    // -------------------------------------------------------------------------
+
+    private void applyTerminalFont() {
+        if (mTerminalView == null || mSettings == null) return;
+        String fontId = mSettings.getFontId();
+        Typeface tf = Typeface.MONOSPACE;
+        if (TerminalSettings.FONT_CUSTOM.equals(fontId)) {
+            File custom = new File(getFilesDir(), CUSTOM_FONT_FILE_NAME);
+            if (custom.isFile() && custom.length() > 0) {
+                try {
+                    Typeface loaded = Typeface.createFromFile(custom);
+                    if (loaded != null) {
+                        tf = loaded;
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+        } else if (TerminalSettings.FONT_NERD_MESLO.equals(fontId)) {
+            try {
+                Typeface loaded = Typeface.createFromAsset(getAssets(), "fonts/MesloLGS_NF_Regular.ttf");
+                if (loaded != null) {
+                    tf = loaded;
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        mTerminalView.setTypeface(tf);
+        mTerminalView.invalidate();
+    }
+
+    private void launchCustomFontPicker() {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("*/*");
+        try {
+            startActivityForResult(intent, REQ_PICK_FONT);
+        } catch (ActivityNotFoundException e) {
+            Toast.makeText(this, "No se encontró selector de archivos en Android.", Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private void launchBackupFilePicker() {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("*/*");
+        try {
+            startActivityForResult(intent, REQ_PICK_BACKUP);
+        } catch (ActivityNotFoundException e) {
+            Toast.makeText(this, "No se encontró selector de archivos en Android.", Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private void handleCustomFontPicked(final Uri uri) {
+        mBgExecutor.execute(() -> {
+            final int maxBytes = 20 * 1024 * 1024;
+            File tmp = new File(getFilesDir(), CUSTOM_FONT_FILE_NAME + ".tmp");
+            File dst = new File(getFilesDir(), CUSTOM_FONT_FILE_NAME);
+            try (InputStream is = getContentResolver().openInputStream(uri)) {
+                if (is == null) {
+                    throw new IOException("No se pudo abrir el archivo de fuente.");
+                }
+                ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                byte[] buf = new byte[16384];
+                int total = 0;
+                int n;
+                while ((n = is.read(buf)) != -1) {
+                    total += n;
+                    if (total > maxBytes) {
+                        throw new IOException("La fuente supera el límite máximo de 20 MB.");
+                    }
+                    baos.write(buf, 0, n);
+                }
+                byte[] bytes = baos.toByteArray();
+                if (!isValidFontMagic(bytes)) {
+                    throw new IOException("El archivo no es una fuente .ttf u .otf válida.");
+                }
+                try (FileOutputStream fos = new FileOutputStream(tmp)) {
+                    fos.write(bytes);
+                }
+                if (dst.exists() && !dst.delete()) {
+                    throw new IOException("No se pudo actualizar custom_font.ttf");
+                }
+                if (!tmp.renameTo(dst)) {
+                    throw new IOException("No se pudo guardar custom_font.ttf");
+                }
+                Typeface.createFromFile(dst);
+                runOnUiThread(() -> {
+                    mSettings.setFontId(TerminalSettings.FONT_CUSTOM);
+                    applyTerminalFont();
+                    Toast.makeText(MainActivity.this, "✓ Fuente personalizada aplicada.", Toast.LENGTH_SHORT).show();
+                });
+            } catch (Throwable t) {
+                //noinspection ResultOfMethodCallIgnored
+                tmp.delete();
+                runOnUiThread(() -> Toast.makeText(
+                    MainActivity.this, "Error importando fuente: " + t.getMessage(), Toast.LENGTH_LONG).show());
+            }
+        });
+    }
+
+    private static boolean isValidFontMagic(byte[] b) {
+        if (b == null || b.length < 4) return false;
+        // TrueType 00 01 00 00 | 'OTTO' | 'true' | 'ttcf'
+        return (b[0] == 0x00 && b[1] == 0x01 && b[2] == 0x00 && b[3] == 0x00)
+            || (b[0] == 'O' && b[1] == 'T' && b[2] == 'T' && b[3] == 'O')
+            || (b[0] == 't' && b[1] == 'r' && b[2] == 'u' && b[3] == 'e')
+            || (b[0] == 't' && b[1] == 't' && b[2] == 'c' && b[3] == 'f');
+    }
+
+    private int resolveAndroidColor(String resName, int fallback) {
+        try {
+            int resId = getResources().getIdentifier(resName, "color", "android");
+            if (resId != 0) {
+                return getResources().getColor(resId, getTheme());
+            }
+        } catch (Throwable ignored) {
+        }
+        return fallback;
+    }
+
+    private void applyMaterialYouTheme() {
+        boolean light = TerminalSettings.isLightScheme(mSettings.getColorSchemeId());
+        boolean enabled = mSettings.isMaterialYouEnabled() && Build.VERSION.SDK_INT >= 31;
+
+        int defaultDarkChrome = Color.parseColor("#161B22");
+        int defaultAccent = Color.parseColor("#D70A53");
+        int chromeColor = defaultDarkChrome;
+        int accent = defaultAccent;
+        int extraSurface = light ? Color.parseColor("#EEE8D5") : defaultDarkChrome;
+
+        if (enabled) {
+            chromeColor = resolveAndroidColor("system_neutral1_900", defaultDarkChrome);
+            int pickedAccent = resolveAndroidColor("system_accent1_500",
+                resolveAndroidColor("system_accent1_600", defaultAccent));
+            if (Color.luminance(pickedAccent) > 0.45f) {
+                pickedAccent = resolveAndroidColor("system_accent1_600", pickedAccent);
+            }
+            accent = pickedAccent;
+            if (!light) {
+                extraSurface = chromeColor;
+            }
+        }
+
+        mActiveAccentColor = accent;
+        if (mTopBar != null) mTopBar.setBackgroundColor(chromeColor);
+        if (mSearchBar != null) mSearchBar.setBackgroundColor(chromeColor);
+        if (mTextInputBar != null) mTextInputBar.setBackgroundColor(chromeColor);
+        if (mBottomExtraRow != null) mBottomExtraRow.setBackgroundColor(extraSurface);
+        if (mExtraKeys != null) {
+            mExtraKeys.setBarSurfaceColor(extraSurface);
+            mExtraKeys.setAccentColor(accent);
+        }
+        refreshDrawerSessions();
+    }
+
+    private void showExtraKeysEditorDialog() {
+        String currentSpec = mSettings.getCustomExtraKeysSpec();
+        String[] existingLines = currentSpec.split("\\r?\\n");
+        String initRow1 = existingLines.length >= 1 ? existingLines[0].trim() : "";
+        String initRow2 = existingLines.length >= 2 ? existingLines[1].trim() : "";
+
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(dp(16), dp(12), dp(16), dp(8));
+
+        TextView presetLbl = new TextView(this);
+        presetLbl.setText("Presets rápidos:");
+        presetLbl.setTypeface(Typeface.DEFAULT_BOLD);
+        presetLbl.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
+        content.addView(presetLbl);
+
+        LinearLayout presetRow = new LinearLayout(this);
+        presetRow.setOrientation(LinearLayout.HORIZONTAL);
+        presetRow.setPadding(0, dp(4), 0, dp(10));
+
+        final EditText row1Et = new EditText(this);
+        final EditText row2Et = new EditText(this);
+        final TextView previewTv = new TextView(this);
+
+        TextView pStd = makeSearchBarBtn("Estándar", "#21262D", v -> {
+            String[] lines = ExtraKeysBarView.PRESET_STANDARD.split("\\r?\\n");
+            row1Et.setText(lines[0]);
+            row2Et.setText(lines.length > 1 ? lines[1] : "");
+        });
+        TextView pProg = makeSearchBarBtn("Programación", "#1F6FEB", v -> {
+            String[] lines = ExtraKeysBarView.PRESET_PROGRAMMING.split("\\r?\\n");
+            row1Et.setText(lines[0]);
+            row2Et.setText(lines.length > 1 ? lines[1] : "");
+        });
+        TextView pVim = makeSearchBarBtn("Tmux / Vim", "#238636", v -> {
+            String[] lines = ExtraKeysBarView.PRESET_TMUX_VIM.split("\\r?\\n");
+            row1Et.setText(lines[0]);
+            row2Et.setText(lines.length > 1 ? lines[1] : "");
+        });
+        presetRow.addView(pStd);
+        presetRow.addView(pProg);
+        presetRow.addView(pVim);
+        content.addView(presetRow);
+
+        TextView r1Lbl = new TextView(this);
+        r1Lbl.setText("Fila 1 (separa teclas con coma o espacio; usa KEY:ALT para pulsación larga):");
+        r1Lbl.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
+        r1Lbl.setTextColor(Color.parseColor("#8B949E"));
+        content.addView(r1Lbl);
+
+        row1Et.setText(initRow1);
+        row1Et.setTypeface(Typeface.MONOSPACE);
+        row1Et.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
+        row1Et.setSingleLine(true);
+        content.addView(row1Et);
+
+        TextView r2Lbl = new TextView(this);
+        r2Lbl.setText("Fila 2 (opcional):");
+        r2Lbl.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
+        r2Lbl.setTextColor(Color.parseColor("#8B949E"));
+        r2Lbl.setPadding(0, dp(6), 0, 0);
+        content.addView(r2Lbl);
+
+        row2Et.setText(initRow2);
+        row2Et.setTypeface(Typeface.MONOSPACE);
+        row2Et.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
+        row2Et.setSingleLine(true);
+        content.addView(row2Et);
+
+        previewTv.setTypeface(Typeface.MONOSPACE);
+        previewTv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f);
+        previewTv.setTextColor(Color.parseColor("#3FB950"));
+        previewTv.setPadding(0, dp(4), 0, dp(8));
+        content.addView(previewTv);
+
+        Runnable updatePreview = () -> {
+            String combined = row1Et.getText().toString().trim() + "\n" + row2Et.getText().toString().trim();
+            List<List<ExtraKeysBarView.KeySpec>> parsed = ExtraKeysBarView.parseCustomSpec(combined);
+            StringBuilder sb = new StringBuilder("Vista previa: ");
+            for (int r = 0; r < parsed.size(); r++) {
+                if (r > 0) sb.append(" | ");
+                sb.append("F").append(r + 1).append(": ");
+                List<ExtraKeysBarView.KeySpec> keys = parsed.get(r);
+                for (int c = 0; c < keys.size(); c++) {
+                    if (c > 0) sb.append(' ');
+                    ExtraKeysBarView.KeySpec k = keys.get(c);
+                    sb.append(k.altLabel != null ? (k.label + "·" + k.altLabel) : k.label);
+                }
+            }
+            previewTv.setText(sb.toString());
+        };
+        updatePreview.run();
+
+        TextWatcher watcher = new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
+            @Override public void onTextChanged(CharSequence s, int start, int before, int count) {}
+            @Override public void afterTextChanged(Editable s) {
+                updatePreview.run();
+            }
+        };
+        row1Et.addTextChangedListener(watcher);
+        row2Et.addTextChangedListener(watcher);
+
+        TextView chipLbl = new TextView(this);
+        chipLbl.setText("Toca para añadir tecla a la fila activa:");
+        chipLbl.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
+        chipLbl.setTypeface(Typeface.DEFAULT_BOLD);
+        chipLbl.setPadding(0, dp(4), 0, dp(4));
+        content.addView(chipLbl);
+
+        final EditText[] activeTarget = { row1Et };
+        row1Et.setOnFocusChangeListener((v, hasFocus) -> { if (hasFocus) activeTarget[0] = row1Et; });
+        row2Et.setOnFocusChangeListener((v, hasFocus) -> { if (hasFocus) activeTarget[0] = row2Et; });
+
+        String[] tokens = {
+            "ESC:~", "/:|", "-:_", "TAB:BACKTAB", "CTRL", "ALT",
+            "HOME", "END", "PGUP", "PGDN", "UP", "DOWN",
+            "LEFT", "RIGHT", "{:[", "}:]", "(:)", "=:+",
+            "$:;", "COLON", "ENTER", "BKSP"
+        };
+        for (int i = 0; i < tokens.length; i += 6) {
+            LinearLayout chipRow = new LinearLayout(this);
+            chipRow.setOrientation(LinearLayout.HORIZONTAL);
+            chipRow.setPadding(0, dp(2), 0, dp(2));
+            for (int j = i; j < Math.min(tokens.length, i + 6); j++) {
+                final String tok = tokens[j];
+                TextView chip = makeSearchBarBtn(tok, "#21262D", v -> {
+                    EditText target = activeTarget[0];
+                    String cur = target.getText().toString().trim();
+                    target.setText(cur.isEmpty() ? tok : (cur + ", " + tok));
+                    target.setSelection(target.getText().length());
+                });
+                chip.setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f);
+                chipRow.addView(chip);
+            }
+            content.addView(chipRow);
+        }
+
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(content);
+
+        AlertDialog dlg = new AlertDialog.Builder(this)
+            .setTitle("⌨ Editor visual de teclas extra")
+            .setView(scroll)
+            .setPositiveButton("Guardar y aplicar", (d, w) -> {
+                String r1 = row1Et.getText().toString().trim();
+                String r2 = row2Et.getText().toString().trim();
+                String spec = r2.isEmpty() ? r1 : (r1.isEmpty() ? r2 : (r1 + "\n" + r2));
+                if (spec.isEmpty()) spec = ExtraKeysBarView.PRESET_STANDARD;
+                mSettings.setCustomExtraKeysSpec(spec);
+                mSettings.setExtraKeysMode(TerminalSettings.EXTRA_KEYS_FULL);
+                mExtraKeys.setCustomSpec(spec);
+                applyExtraKeysMode(TerminalSettings.EXTRA_KEYS_FULL, true);
+                Toast.makeText(MainActivity.this, "✓ Teclas extra actualizadas.", Toast.LENGTH_SHORT).show();
+            })
+            .setNeutralButton("Estándar", null)
+            .setNegativeButton("Cancelar", null)
+            .create();
+
+        dlg.setOnShowListener(d -> dlg.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(v -> {
+            String[] lines = ExtraKeysBarView.PRESET_STANDARD.split("\\r?\\n");
+            row1Et.setText(lines[0]);
+            row2Et.setText(lines.length > 1 ? lines[1] : "");
+        }));
+        dlg.show();
+    }
+
+    private void openDocumentsProvider() {
+        Uri rootUri = DocumentsContract.buildRootUri(
+            DebianDocumentsProvider.AUTHORITY,
+            DebianDocumentsProvider.ROOT_ID_HOME
+        );
+        try {
+            Intent viewIntent = new Intent(Intent.ACTION_VIEW, rootUri);
+            viewIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+            startActivity(viewIntent);
+            return;
+        } catch (ActivityNotFoundException | SecurityException ignored) {
+        }
+        try {
+            Intent browseIntent = new Intent("android.provider.action.BROWSE", rootUri);
+            browseIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+            startActivity(browseIntent);
+            return;
+        } catch (ActivityNotFoundException | SecurityException ignored) {
+        }
+
+        new AlertDialog.Builder(this)
+            .setTitle("📂 Storage Access Framework (SAF)")
+            .setMessage("El proveedor de archivos \"DebianTerm (Home)\" ("
+                + DebianDocumentsProvider.AUTHORITY + ") ya está activo.\n\n"
+                + "Puedes abrir, editar y guardar archivos de /root (Debian Sin Root) directamente sin copiar por /sdcard desde:\n"
+                + "• Material Files (Menú lateral → Añadir almacenamiento → Proveedor externo)\n"
+                + "• Acode / QuickEdit (Abrir archivo / Abrir carpeta → Menú lateral → DebianTerm (Home))\n"
+                + "• La app Archivos de Android")
+            .setPositiveButton("Entendido", null)
+            .show();
+    }
+
+    private void showBackupRestoreDialog() {
+        File prootRootfs = ProotManager.getRootfsDir(this);
+        File prootHome = new File(prootRootfs, "root");
+        final boolean hasProot = prootRootfs.isDirectory() && new File(prootRootfs, "bin/bash").exists();
+        final boolean hasProotHome = prootHome.isDirectory();
+        final boolean hasRootDebian = mLastReport.hasRoot && mLastReport.rootStatus.rootfsExists;
+
+        File defaultDir = BackupManager.getDefaultBackupDir(this);
+        final List<File> archives = BackupManager.listBackupArchives(this);
+
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(dp(16), dp(12), dp(16), dp(8));
+
+        TextView pathTv = new TextView(this);
+        pathTv.setText("Carpeta de respaldos:\n" + defaultDir.getAbsolutePath());
+        pathTv.setTypeface(Typeface.MONOSPACE);
+        pathTv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f);
+        pathTv.setTextColor(Color.parseColor("#C9D1D9"));
+        pathTv.setBackgroundColor(Color.parseColor("#0D1117"));
+        pathTv.setPadding(dp(10), dp(8), dp(10), dp(8));
+        content.addView(pathTv);
+
+        final AlertDialog[] dlgHolder = new AlertDialog[1];
+
+        Button bakHomeBtn = makeActionButton(
+            "💾 Respaldar Home PRoot + Ajustes (.tar.gz)",
+            hasProotHome ? "#238636" : "#30363D",
+            v -> {
+                if (dlgHolder[0] != null) dlgHolder[0].dismiss();
+                runBackupTask(false);
+            }
+        );
+        bakHomeBtn.setEnabled(hasProotHome);
+        bakHomeBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        LinearLayout.LayoutParams b1Lp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        b1Lp.setMargins(0, dp(10), 0, 0);
+        content.addView(bakHomeBtn, b1Lp);
+
+        Button bakFullBtn = makeActionButton(
+            "📦 Respaldar Debian 12 PRoot completo (.tar.gz)",
+            hasProot ? "#1F6FEB" : "#30363D",
+            v -> {
+                if (dlgHolder[0] != null) dlgHolder[0].dismiss();
+                runBackupTask(true);
+            }
+        );
+        bakFullBtn.setEnabled(hasProot);
+        bakFullBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        LinearLayout.LayoutParams b2Lp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        b2Lp.setMargins(0, dp(6), 0, 0);
+        content.addView(bakFullBtn, b2Lp);
+
+        if (hasRootDebian) {
+            Button bakRootBtn = makeActionButton(
+                "🔐 Respaldar /root (Chroot Root) a .tar.gz",
+                "#D70A53",
+                v -> {
+                    if (dlgHolder[0] != null) dlgHolder[0].dismiss();
+                    runRootHomeBackupTask(mSettings.getChrootPath());
+                }
+            );
+            bakRootBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+            LinearLayout.LayoutParams b3Lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            b3Lp.setMargins(0, dp(6), 0, 0);
+            content.addView(bakRootBtn, b3Lp);
+        }
+
+        Button pickRestoreBtn = makeActionButton(
+            "📂 Restaurar desde archivo (.tar.gz)...",
+            "#21262D",
+            v -> {
+                if (dlgHolder[0] != null) dlgHolder[0].dismiss();
+                launchBackupFilePicker();
+            }
+        );
+        pickRestoreBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        LinearLayout.LayoutParams b4Lp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        b4Lp.setMargins(0, dp(6), 0, dp(10));
+        content.addView(pickRestoreBtn, b4Lp);
+
+        TextView listHdr = new TextView(this);
+        listHdr.setText("Respaldos encontrados (" + archives.size() + "):");
+        listHdr.setTypeface(Typeface.DEFAULT_BOLD);
+        listHdr.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
+        listHdr.setPadding(0, dp(4), 0, dp(6));
+        content.addView(listHdr);
+
+        if (archives.isEmpty()) {
+            TextView emptyTv = new TextView(this);
+            emptyTv.setText("Aún no hay archivos .tar.gz guardados en las carpetas de respaldo.");
+            emptyTv.setTextColor(Color.parseColor("#8B949E"));
+            emptyTv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+            content.addView(emptyTv);
+        } else {
+            SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US);
+            for (final File arch : archives) {
+                LinearLayout row = new LinearLayout(this);
+                row.setOrientation(LinearLayout.VERTICAL);
+                row.setBackground(makeRoundedBg("#161B22", "#30363D", 6));
+                row.setPadding(dp(10), dp(8), dp(10), dp(8));
+                LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                rlp.setMargins(0, 0, 0, dp(6));
+                row.setLayoutParams(rlp);
+
+                TextView nameTv = new TextView(this);
+                nameTv.setText(arch.getName());
+                nameTv.setTextColor(Color.parseColor("#E6EDF3"));
+                nameTv.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+                nameTv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f);
+                row.addView(nameTv);
+
+                TextView metaTv = new TextView(this);
+                metaTv.setText(BackupManager.formatByteSize(arch.length())
+                    + " • " + sdf.format(new Date(arch.lastModified())));
+                metaTv.setTextColor(Color.parseColor("#8B949E"));
+                metaTv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f);
+                row.addView(metaTv);
+
+                row.setOnClickListener(v -> {
+                    String[] opts = {
+                        "Restaurar en Home PRoot (/root)",
+                        "Restaurar en Rootfs PRoot completo",
+                        "Eliminar respaldo"
+                    };
+                    new AlertDialog.Builder(MainActivity.this)
+                        .setTitle(arch.getName())
+                        .setItems(opts, (d2, idx) -> {
+                            if (idx == 0) {
+                                if (dlgHolder[0] != null) dlgHolder[0].dismiss();
+                                confirmAndRunRestore(arch, null, false);
+                            } else if (idx == 1) {
+                                if (dlgHolder[0] != null) dlgHolder[0].dismiss();
+                                confirmAndRunRestore(arch, null, true);
+                            } else if (idx == 2) {
+                                new AlertDialog.Builder(MainActivity.this)
+                                    .setTitle("Eliminar respaldo")
+                                    .setMessage("¿Eliminar permanentemente " + arch.getName() + "?")
+                                    .setPositiveButton("Eliminar", (d3, w3) -> {
+                                        //noinspection ResultOfMethodCallIgnored
+                                        arch.delete();
+                                        if (dlgHolder[0] != null) dlgHolder[0].dismiss();
+                                        showBackupRestoreDialog();
+                                    })
+                                    .setNegativeButton("Cancelar", null)
+                                    .show();
+                            }
+                        })
+                        .show();
+                });
+                content.addView(row);
+            }
+        }
+
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(content);
+
+        dlgHolder[0] = new AlertDialog.Builder(this)
+            .setTitle("💾 Respaldo y Restauración (.tar.gz)")
+            .setView(scroll)
+            .setNegativeButton("Cerrar", null)
+            .create();
+        dlgHolder[0].show();
+    }
+
+    private void showRestoreTargetChooser(final File archiveFile, final Uri uri) {
+        String[] opts = {
+            "Restaurar Home PRoot (/root) + Ajustes",
+            "Restaurar Debian 12 PRoot completo"
+        };
+        new AlertDialog.Builder(this)
+            .setTitle("¿Dónde restaurar este respaldo?")
+            .setItems(opts, (d, idx) -> confirmAndRunRestore(archiveFile, uri, idx == 1))
+            .setNegativeButton("Cancelar", null)
+            .show();
+    }
+
+    private void confirmAndRunRestore(final File archiveFile, final Uri uri, final boolean fullRootfs) {
+        String name = archiveFile != null ? archiveFile.getName() : "archivo seleccionado";
+        String msg = fullRootfs
+            ? ("Se extraerá '" + name + "' encima del rootfs PRoot completo (Sin Root).\n\nCierra primero sesiones PRoot activas para evitar archivos bloqueados.")
+            : ("Se restaurará '" + name + "' dentro de /root (Home PRoot) y se detectarán ajustes incluidos.");
+        new AlertDialog.Builder(this)
+            .setTitle("Confirmar restauración")
+            .setMessage(msg)
+            .setPositiveButton("Restaurar ahora", (d, w) -> runRestoreTask(archiveFile, uri, fullRootfs))
+            .setNegativeButton("Cancelar", null)
+            .show();
+    }
+
+    private void runBackupTask(final boolean fullRootfs) {
+        File rootfs = ProotManager.getRootfsDir(this);
+        final File sourceDir = fullRootfs ? rootfs : new File(rootfs, "root");
+        final File outDir = BackupManager.getDefaultBackupDir(this);
+        final File outFile = new File(outDir, BackupManager.buildArchiveFilename(fullRootfs ? "proot-full" : "proot-home"));
+        final byte[] metaBytes = mSettings.exportMetadataBytes();
+        final java.util.Set<String> skipSet = fullRootfs
+            ? BackupManager.SKIP_ROOTFS_TOP_DIRS
+            : BackupManager.SKIP_HOME_TOP_DIRS;
+
+        LinearLayout layout = new LinearLayout(this);
+        layout.setOrientation(LinearLayout.VERTICAL);
+        layout.setPadding(dp(18), dp(14), dp(18), dp(10));
+
+        final TextView msgTv = new TextView(this);
+        msgTv.setText("Creando respaldo en:\n" + outFile.getAbsolutePath());
+        msgTv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
+        layout.addView(msgTv);
+
+        final ProgressBar pb = new ProgressBar(this);
+        layout.addView(pb);
+
+        final AtomicBoolean cancelled = new AtomicBoolean(false);
+        final AlertDialog progDlg = new AlertDialog.Builder(this)
+            .setTitle(fullRootfs ? "Respaldando PRoot completo..." : "Respaldando Home + Ajustes...")
+            .setView(layout)
+            .setCancelable(false)
+            .setNegativeButton("Cancelar", null)
+            .create();
+
+        progDlg.setOnShowListener(d -> progDlg.getButton(AlertDialog.BUTTON_NEGATIVE).setOnClickListener(v -> {
+            cancelled.set(true);
+            msgTv.setText("Cancelando respaldo...");
+            progDlg.getButton(AlertDialog.BUTTON_NEGATIVE).setEnabled(false);
+        }));
+        progDlg.show();
+
+        mBgExecutor.execute(() -> {
+            final BackupManager.BackupResult res = BackupManager.createTarGz(
+                sourceDir,
+                outFile,
+                BackupManager.META_ENTRY_NAME,
+                metaBytes,
+                skipSet,
+                cancelled,
+                (entries, bytes, entry) -> runOnUiThread(() -> msgTv.setText(
+                    "Entradas: " + entries + " (" + BackupManager.formatByteSize(bytes) + ")\n" + entry))
+            );
+            runOnUiThread(() -> {
+                if (progDlg.isShowing()) progDlg.dismiss();
+                if (res.success) {
+                    new AlertDialog.Builder(MainActivity.this)
+                        .setTitle("✓ Respaldo completado")
+                        .setMessage("Archivo guardado:\n" + res.outputFile.getAbsolutePath()
+                            + "\n\nEntradas: " + res.entriesCount
+                            + "\nTamaño comprimido: " + BackupManager.formatByteSize(res.archiveBytes))
+                        .setPositiveButton("Listo", null)
+                        .show();
+                } else {
+                    Toast.makeText(MainActivity.this, res.message, Toast.LENGTH_LONG).show();
+                }
+            });
+        });
+    }
+
+    private void runRootHomeBackupTask(final String chrootPath) {
+        final File outDir = BackupManager.getDefaultBackupDir(this);
+        final File outFile = new File(outDir, BackupManager.buildArchiveFilename("root-home"));
+        Toast.makeText(this, "Generando respaldo de " + chrootPath + "/root...", Toast.LENGTH_SHORT).show();
+        mBgExecutor.execute(() -> {
+            final BackupManager.BackupResult res = BackupManager.backupRootHome(chrootPath, outFile);
+            runOnUiThread(() -> {
+                if (res.success) {
+                    new AlertDialog.Builder(MainActivity.this)
+                        .setTitle("✓ Respaldo Root /root listo")
+                        .setMessage("Archivo guardado:\n" + res.outputFile.getAbsolutePath()
+                            + "\nTamaño: " + BackupManager.formatByteSize(res.archiveBytes))
+                        .setPositiveButton("Listo", null)
+                        .show();
+                } else {
+                    Toast.makeText(MainActivity.this, res.message, Toast.LENGTH_LONG).show();
+                }
+            });
+        });
+    }
+
+    private void runRestoreTask(final File archiveFile, final Uri uri, final boolean fullRootfs) {
+        final File rootfs = ProotManager.getRootfsDir(this);
+        final File targetDir = fullRootfs ? rootfs : new File(rootfs, "root");
+
+        LinearLayout layout = new LinearLayout(this);
+        layout.setOrientation(LinearLayout.VERTICAL);
+        layout.setPadding(dp(18), dp(14), dp(18), dp(10));
+
+        final TextView msgTv = new TextView(this);
+        msgTv.setText("Extrayendo respaldo en " + targetDir.getAbsolutePath() + "...");
+        msgTv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
+        layout.addView(msgTv);
+
+        ProgressBar pb = new ProgressBar(this);
+        layout.addView(pb);
+
+        final AtomicBoolean cancelled = new AtomicBoolean(false);
+        final AlertDialog progDlg = new AlertDialog.Builder(this)
+            .setTitle("Restaurando respaldo...")
+            .setView(layout)
+            .setCancelable(false)
+            .setNegativeButton("Cancelar", null)
+            .create();
+
+        progDlg.setOnShowListener(d -> progDlg.getButton(AlertDialog.BUTTON_NEGATIVE).setOnClickListener(v -> {
+            cancelled.set(true);
+            msgTv.setText("Cancelando restauración...");
+            progDlg.getButton(AlertDialog.BUTTON_NEGATIVE).setEnabled(false);
+        }));
+        progDlg.show();
+
+        mBgExecutor.execute(() -> {
+            BackupManager.RestoreResult res;
+            if (archiveFile != null) {
+                res = BackupManager.restoreTarGz(archiveFile, targetDir, cancelled,
+                    (entries, bytes, entry) -> runOnUiThread(() ->
+                        msgTv.setText("Entradas restauradas: " + entries
+                            + " (" + BackupManager.formatByteSize(bytes) + ")")));
+            } else {
+                try (InputStream is = getContentResolver().openInputStream(uri)) {
+                    res = BackupManager.restoreTarGz(is, targetDir, cancelled,
+                        (entries, bytes, entry) -> runOnUiThread(() ->
+                            msgTv.setText("Entradas restauradas: " + entries
+                                + " (" + BackupManager.formatByteSize(bytes) + ")")));
+                } catch (IOException e) {
+                    res = new BackupManager.RestoreResult(false, 0L, null,
+                        "Error abriendo URI: " + e.getMessage());
+                }
+            }
+
+            if (res.success) {
+                try {
+                    if (fullRootfs && rootfs.isDirectory()) {
+                        ProotManager.configureRootfs(rootfs);
+                        ProotManager.installLauncherScript(MainActivity.this, mSettings.isProotDisableSeccomp());
+                    } else if (rootfs.isDirectory() && ProotManager.hasSharedStorageAccess(MainActivity.this)) {
+                        ProotManager.setupStorageLinks(rootfs);
+                    }
+                } catch (IOException ignored) {
+                }
+            }
+
+            final SystemRequirements.Report fresh = SystemRequirements.runCheck(MainActivity.this, mSettings);
+            final BackupManager.RestoreResult finalRes = res;
+
+            runOnUiThread(() -> {
+                if (progDlg.isShowing()) progDlg.dismiss();
+                mLastReport = fresh;
+                renderDashboardReport(fresh);
+                updateChrootStatusBadges(fresh);
+                if (!finalRes.success) {
+                    Toast.makeText(MainActivity.this, finalRes.message, Toast.LENGTH_LONG).show();
+                    return;
+                }
+                if (finalRes.metadataBytes != null && finalRes.metadataBytes.length > 0) {
+                    new AlertDialog.Builder(MainActivity.this)
+                        .setTitle("✓ Respaldo restaurado (" + finalRes.entriesCount + " entradas)")
+                        .setMessage("Este respaldo contiene tu configuración previa de DebianTerm (tema, fuente, tamaño, teclas extra y snippets).\n\n¿Deseas restaurar también esos ajustes?")
+                        .setPositiveButton("Aplicar ajustes", (d2, w2) -> {
+                            if (mSettings.importMetadataBytes(finalRes.metadataBytes)) {
+                                applyColorScheme(mSettings.getColorSchemeId());
+                                applyTerminalFont();
+                                mTerminalView.setTextSize(mSettings.getFontSizePx());
+                                mExtraKeys.setCustomSpec(mSettings.getCustomExtraKeysSpec());
+                                applyExtraKeysMode(mSettings.getExtraKeysMode(), true);
+                                mExtraKeys.setHapticEnabled(mSettings.isHapticEnabled());
+                                Toast.makeText(MainActivity.this,
+                                    "✓ Archivos y ajustes restaurados.", Toast.LENGTH_SHORT).show();
+                            }
+                        })
+                        .setNegativeButton("Solo archivos", null)
+                        .show();
+                } else {
+                    Toast.makeText(MainActivity.this,
+                        "✓ Restauración completada (" + finalRes.entriesCount + " entradas).",
+                        Toast.LENGTH_LONG).show();
+                }
+            });
+        });
+    }
+
+    // -------------------------------------------------------------------------
     // Extra Keys & Soft Keyboard Helpers
     // -------------------------------------------------------------------------
 
@@ -3602,6 +4482,12 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
                 break;
             case "RIGHT":
                 mTerminalView.handleKeyCode(KeyEvent.KEYCODE_DPAD_RIGHT, mod);
+                break;
+            case "ENTER":
+                mTerminalView.handleKeyCode(KeyEvent.KEYCODE_ENTER, mod);
+                break;
+            case "BKSP":
+                mTerminalView.handleKeyCode(KeyEvent.KEYCODE_DEL, mod);
                 break;
             default:
                 if (keyCode.length() == 1) {

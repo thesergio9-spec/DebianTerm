@@ -1,6 +1,6 @@
 # DebianTerm
 
-**DebianTerm** (v2.2.0) es un **instalador completo de Debian 12 (Bookworm)** y emulador de terminal + escritorio gráfico para Android basado en el motor y teclado de Termux (`terminal-emulator` y `terminal-view`), con **verificación de requerimientos mínimos al iniciar**, selector **Terminal (CLI) vs Modo Gráfico Híbrido** y **dos caminos de ejecución totalmente funcionales**:
+**DebianTerm** (v2.3.0) es un **instalador completo de Debian 12 (Bookworm)** y emulador de terminal + escritorio gráfico para Android basado en el motor y teclado de Termux (`terminal-emulator` y `terminal-view`), con **verificación de requerimientos mínimos al iniciar**, selector **Terminal (CLI) vs Modo Gráfico Híbrido** y **dos caminos de ejecución totalmente funcionales**:
 
 1. **Camino 1 — Con Root (Chroot Nativo)**: máximo rendimiento del kernel Linux y montajes reales para dispositivos con Magisk, KernelSU o APatch.
 2. **Camino 2 — Sin Root (PRoot Integrado)**: motor `PRoot` empaquetado directamente en el APK (`arm64-v8a` y `armeabi-v7a`), **100% independiente de Termux**, para dispositivos sin acceso root.
@@ -12,11 +12,11 @@ Coexiste de forma independiente junto a Termux (`com.termux`) usando su propio p
 ## 📥 Descarga Rápida
 
 Descarga el APK compilado desde la última Release:
-- **[DebianTerm.apk (v2.2.0)](https://github.com/thesergio9-spec/DebianTerm/releases/download/v2.2.0/DebianTerm.apk)**
+- **[DebianTerm.apk (v2.3.0)](https://github.com/thesergio9-spec/DebianTerm/releases/download/v2.3.0/DebianTerm.apk)**
 
 ---
 
-## 🚀 Características Principales (v2.2.0)
+## 🚀 Características Principales (v2.3.0)
 
 ### 1. Panel de Inicio y Verificación de Requerimientos Mínimos
 Al abrir la app se ejecuta automáticamente un diagnóstico (`SystemRequirements`) antes de instalar o iniciar Debian 12:
@@ -65,7 +65,13 @@ En la tarjeta **Modo de Inicio**, antes de abrir Debian 12 en cualquiera de los 
 - **Buscar en Terminal (`🔍`)**: barra de búsqueda integrada sobre las 4,000 líneas del historial (`TerminalSearch`) con sensibilidad `Aa`, navegación `▲`/`▼`, resaltado anclado al scrollback y copia rápida de la línea coincidente.
 - **Snippets (`⚡`) y Entrada de Texto para Gboard/Voz (`📝`)**: gestor de comandos rápidos personalizables y barra inferior deslizable (desliza la fila de teclas extra o pulsa `📝`) para escribir con autocorrección, sugerencias o dictado por voz de Gboard.
 - **Detector y mitigador de *Phantom Process Killer* (`signal 9`)**: comprueba el límite de procesos secundarios de Android 12–15 en `SystemRequirements`, avisa si una sesión muere con `signal 9`, aplica la corrección con 1 toque si tienes **Root** (`PhantomProcessManager`) o muestra comandos ADB y acceso directo a *Opciones de desarrollador* en equipos **Sin Root**.
-- **Scrollback Anclado a Filas de Documento** y barra de teclas extra configurables (`ESC`, `TAB`, `CTRL`, `ALT`, flechas, etc.), más 5 temas de color y servicio en primer plano con **Wake Lock completo (`PARTIAL_WAKE_LOCK` + `WifiLock`)**, control rápido en el menú lateral (`⚡`), modo automático opcional en Ajustes, botón de exclusión de batería (*Doze*) y soporte de notificaciones Android 13+.
+- **Storage Access Framework (`DebianDocumentsProvider`)**: expone el directorio `/root` de Debian Sin Root a gestores de archivos y editores de código Android (**Material Files**, **Acode**, **QuickEdit**, app **Archivos**) sin copiar archivos por `/sdcard` y bloqueando recorridos de ruta o symlinks externos.
+- **Respaldo y Restauración en 1 toque (`BackupManager`, `.tar.gz`)**: creación y restauración de copias `.tar.gz` en Java puro (USTAR/PAX) desde Panel, Menú Lateral o Ajustes para Home PRoot + Ajustes/Snippets, Rootfs PRoot completo o `/root` Con Root en `/sdcard/Download/DebianTerm-Backups` o selector de Android.
+- **Personalización visual sin dotfiles**:
+  - **Nerd Font integrada (`MesloLGS_NF_Regular.ttf`)**: lista de fábrica para prompts, iconos y barras de estado, más importador visual de fuentes `.ttf` / `.otf` personalizadas desde Android.
+  - **Editor visual y presets de Teclas Extra**: presets de un toque (*Estándar*, *Programación*, *Tmux / Vim*) y editor de 2 filas con fichas táctiles en `Ajustes rápidos`.
+  - **Tema dinámico Material You / Monet (Android 12+)**: adapta barras y acentos en vivo a la paleta del sistema sin cerrar las sesiones activas.
+- **Scrollback Anclado a Filas de Documento**, 5 temas de color y servicio en primer plano con **Wake Lock completo (`PARTIAL_WAKE_LOCK` + `WifiLock`)**, control rápido en el menú lateral (`⚡`), modo automático opcional en Ajustes, botón de exclusión de batería (*Doze*) y soporte de notificaciones Android 13+.
 
 ---
 
@@ -73,11 +79,14 @@ En la tarjeta **Modo de Inicio**, antes de abrir Debian 12 en cualquiera de los 
 
 ```
 DebianTerm/
-├── AndroidManifest.xml          # Configuración com.debianchroot.term (targetSdk 28 para PRoot)
+├── AndroidManifest.xml          # Configuración com.debianchroot.term + SAF Provider (targetSdk 28)
+├── assets/fonts/                # Fuente Nerd Font integrada (MesloLGS_NF_Regular.ttf)
 ├── res/                         # Iconos vectoriales, colores, estilos y cadenas
 ├── src/
 │   ├── com/debianchroot/term/
 │   │   ├── MainActivity.java        # Dashboard de requisitos/gráficos/caminos + Terminal + Visor VNC
+│   │   ├── DebianDocumentsProvider.java # Proveedor SAF para explorar/editar /root PRoot sin /sdcard
+│   │   ├── BackupManager.java       # Respaldo y restauración .tar.gz en 1 toque (Java puro)
 │   │   ├── SystemRequirements.java  # Verificador de requerimientos mínimos y estado gráfico
 │   │   ├── DesktopManager.java      # Gestor XFCE4/LXDE, detección/descarga Termux:X11 y scripts GUI
 │   │   ├── RfbClient.java           # Cliente RFB 3.8 puro Java (Raw, CopyRect, Zlib, VNCAuth DES)
@@ -98,7 +107,7 @@ DebianTerm/
 ├── libs/                        # Bibliotecas JAR (annotation-1.5.0, xz-1.9)
 ├── jniLibs/                     # Binarios nativos arm64-v8a y armeabi-v7a:
 │   │                            # libtermux.so, libproot.so, libproot_loader.so, libproot_loader32.so
-├── tests/                       # Suite de 17 pruebas unitarias en JVM (VerifyAll.java)
+├── tests/                       # Suite de 20 pruebas unitarias en JVM (VerifyAll.java)
 ├── setup-deps.sh                # Descarga código base Termux, JARs, libtermux.so y binarios PRoot
 └── build.sh                     # Compilación completa (aapt2, javac, d8, zipalign, apksigner)
 ```
@@ -125,7 +134,7 @@ El APK resultante se generará en `build/DebianTerm-release.apk`.
 
 ## 🧪 Pruebas Unitarias
 
-La suite [VerifyAll.java](tests/VerifyAll.java) valida en JVM las **17 pruebas clave**:
+La suite [VerifyAll.java](tests/VerifyAll.java) valida en JVM las **20 pruebas clave**:
 1. Salida sincronizada `DECSET 2026` + consultas `DECRQM`.
 2. Modo Pan del teclado sin pérdida de scrollback ni redimensionamiento PTY (`SIGWINCH`).
 3. Parser en vivo del índice LXC (`bookworm` / `trixie`) y verificación `SHA256SUMS`.
@@ -143,6 +152,9 @@ La suite [VerifyAll.java](tests/VerifyAll.java) valida en JVM las **17 pruebas c
 15. Parser de estado y generador ADB del mitigador de *Phantom Process Killer* (`PhantomProcessManager`).
 16. Búsqueda anclada al scrollback (`TerminalSearch`: insensible/sensible a mayúsculas, caracteres anchos y API de resaltado en `TerminalView`).
 17. Snippets rápidos (`SnippetManager`: defaults, serialización con escapes y contrato de gesto hacia *Text Input View*).
+18. Seguridad de rutas en `DebianDocumentsProvider` (SAF): bloqueo de *path traversal*, bloqueo de symlinks externos, tipos MIME seguros y registro en `AndroidManifest.xml`.
+19. Ciclo completo `.tar.gz` en `BackupManager`: respaldo y restauración con permisos ejecutables, rutas largas PAX (>115 chars), symlinks internos, exclusión de symlinks externos y de `dev`/`storage`, y recuperación/limpieza de metadatos.
+20. Parser visual y presets de teclas extra (`ExtraKeysBarView`), validación binaria TTF de `MesloLGS_NF_Regular.ttf` empaquetada y API de preferencias de tipografía y Material You (`TerminalSettings`).
 
 ```bash
 javac -encoding UTF-8 -cp build/classes:/opt/android-sdk/android.jar:libs/xz-1.9.jar -d build/test-classes tests/VerifyAll.java
