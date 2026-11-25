@@ -2,16 +2,21 @@ import com.debianchroot.term.ChrootInstaller;
 import com.debianchroot.term.ChrootManager;
 import com.debianchroot.term.DebianTermService;
 import com.debianchroot.term.DesktopManager;
+import com.debianchroot.term.ExtraKeysBarView;
+import com.debianchroot.term.PhantomProcessManager;
 import com.debianchroot.term.ProotManager;
 import com.debianchroot.term.RfbClient;
+import com.debianchroot.term.SnippetManager;
 import com.debianchroot.term.SystemRequirements;
 import com.debianchroot.term.TarExtractor;
+import com.debianchroot.term.TerminalSearch;
 import com.debianchroot.term.TerminalSettings;
 import com.termux.terminal.TerminalColorScheme;
 import com.termux.terminal.TerminalEmulator;
 import com.termux.terminal.TerminalOutput;
 import com.termux.terminal.TerminalSession;
 import com.termux.terminal.TerminalSessionClient;
+import com.termux.view.TerminalView;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -32,6 +37,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.List;
 import java.util.Properties;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -55,6 +61,9 @@ import java.util.zip.Deflater;
  * 12) Session numbering reuse & lifecycle API (lowest available #N, SessionKind, pruning)
  * 13) WakeLock + WifiLock + AutoWakeLock + Doze/Notifications API & Manifest permissions
  * 14) setup-storage permissions, ProotManager ~/storage symlinks, CLI script & /sdcard bindings
+ * 15) PhantomProcessManager status parsing & ADB mitigation command generation
+ * 16) TerminalSearch anchored-row search across scrollback, case sensitivity, wide chars & TerminalView API
+ * 17) SnippetManager defaults, escaped serialization round-trip & Gboard TextInput listener contract
  */
 public final class VerifyAll {
 
@@ -124,7 +133,10 @@ public final class VerifyAll {
         testSessionNumberingAndLifecycleApi();
         testWakeLockAndPowerApi();
         testSetupStorageAndProotBindings();
-        System.out.println("ALL 14 VERIFICATION TESTS PASSED.");
+        testPhantomProcessParser();
+        testTerminalSearch();
+        testSnippetManagerSerialization();
+        System.out.println("ALL 17 VERIFICATION TESTS PASSED.");
     }
 
     private static void testDecset2026() {
@@ -853,6 +865,121 @@ public final class VerifyAll {
             "AndroidManifest must declare MANAGE_EXTERNAL_STORAGE");
 
         System.out.println("[PASS] Test 14: setup-storage permissions, ~/storage symlinks, CLI script & /sdcard bindings");
+    }
+
+    private static void testPhantomProcessParser() throws Exception {
+        PhantomProcessManager.Status legacy = PhantomProcessManager.parsePhantomStatus(30, null, null, null);
+        check(!legacy.affectedApi && legacy.knownMitigated, "API 30 must not be affected by Phantom Killer");
+
+        PhantomProcessManager.Status android15Def = PhantomProcessManager.parsePhantomStatus(35, "true", null, null);
+        check(android15Def.affectedApi && !android15Def.knownMitigated && android15Def.summary.contains("32"),
+            "Android 15 default must warn with limit 32: " + android15Def.summary);
+
+        PhantomProcessManager.Status disabled = PhantomProcessManager.parsePhantomStatus(35, "false", null, null);
+        check(disabled.monitoringDisabled && disabled.knownMitigated,
+            "monitorFlag=false must mark mitigated");
+
+        PhantomProcessManager.Status raisedDc = PhantomProcessManager.parsePhantomStatus(35, "true", null, "2147483647");
+        check(raisedDc.maxPhantomProcesses == 2147483647 && raisedDc.knownMitigated,
+            "deviceConfigMax=2147483647 must mark mitigated");
+
+        PhantomProcessManager.Status raisedConsts = PhantomProcessManager.parsePhantomStatus(
+            35, null, "foo=1,max_phantom_processes=65536,bar=2", null);
+        check(raisedConsts.maxPhantomProcesses == 65536 && raisedConsts.knownMitigated,
+            "activity_manager_constants max_phantom_processes=65536 must mark mitigated");
+
+        PhantomProcessManager.Status lowLimit = PhantomProcessManager.parsePhantomStatus(35, "true", null, "32");
+        check(lowLimit.maxPhantomProcesses == 32 && !lowLimit.knownMitigated,
+            "Limit 32 must NOT mark mitigated");
+
+        String adbCmds = PhantomProcessManager.getAdbFixCommands();
+        check(adbCmds.contains("settings_enable_monitor_phantom_procs false")
+            && adbCmds.contains("max_phantom_processes 2147483647"),
+            "ADB commands must contain phantom fix instructions");
+
+        check(SystemRequirements.Report.class.getField("phantomStatus").getType() == PhantomProcessManager.Status.class,
+            "Report.phantomStatus field type mismatch");
+        check(Modifier.isPublic(PhantomProcessManager.class.getMethod("applyRootFix").getModifiers()),
+            "applyRootFix must be public");
+
+        System.out.println("[PASS] Test 15: PhantomProcessManager status parser & ADB mitigation commands");
+    }
+
+    private static void testTerminalSearch() throws Exception {
+        RecordingOutput out = new RecordingOutput();
+        TerminalEmulator em = new TerminalEmulator(out, 80, 24, 10, 20, 2000, new StubSessionClient());
+
+        StringBuilder sb = new StringBuilder();
+        for (int i = 1; i <= 70; i++) {
+            sb.append("log line ").append(i).append('\r').append('\n');
+        }
+        sb.append("🚀 ERROR alpha and error beta on wide row\r\n");
+        for (int i = 72; i <= 80; i++) {
+            sb.append("tail line ").append(i).append('\r').append('\n');
+        }
+        feed(em, sb.toString());
+
+        List<TerminalSearch.Match> ciMatches = TerminalSearch.search(em, "error", false);
+        check(ciMatches.size() == 2, "Case-insensitive search expected 2 matches, got " + ciMatches.size());
+        check(ciMatches.get(0).startCol > 2, "Wide emoji char must shift startCol >= 3, got " + ciMatches.get(0).startCol);
+        check(ciMatches.get(1).startCol > ciMatches.get(0).startCol, "Second occurrence must appear to the right");
+
+        List<TerminalSearch.Match> csMatches = TerminalSearch.search(em, "ERROR", true);
+        check(csMatches.size() == 1, "Case-sensitive search expected 1 match, got " + csMatches.size());
+        long absBeforeMoreOutput = csMatches.get(0).absoluteRow;
+
+        for (int i = 1; i <= 10; i++) {
+            feed(em, "extra scroll " + i + "\r\n");
+        }
+        List<TerminalSearch.Match> csAfter = TerminalSearch.search(em, "ERROR", true);
+        check(csAfter.size() == 1 && csAfter.get(0).absoluteRow == absBeforeMoreOutput,
+            "Anchored absoluteRow must remain constant as output scrolls: before="
+                + absBeforeMoreOutput + " after=" + (csAfter.isEmpty() ? -1 : csAfter.get(0).absoluteRow));
+
+        check(TerminalSearch.search(em, "", false).isEmpty(), "Empty query must return empty matches");
+        check(Modifier.isPublic(TerminalView.class.getMethod("setSearchHighlight", long.class, int.class, int.class).getModifiers()),
+            "TerminalView.setSearchHighlight must be public");
+        check(Modifier.isPublic(TerminalView.class.getMethod("clearSearchHighlight").getModifiers()),
+            "TerminalView.clearSearchHighlight must be public");
+        check(Modifier.isPublic(TerminalView.class.getMethod("scrollToAbsoluteRow", long.class).getModifiers()),
+            "TerminalView.scrollToAbsoluteRow must be public");
+
+        System.out.println("[PASS] Test 16: TerminalSearch anchored scrollback search, wide chars & highlight API");
+    }
+
+    private static void testSnippetManagerSerialization() throws Exception {
+        List<SnippetManager.Snippet> defaults = SnippetManager.getDefaultSnippets();
+        check(defaults.size() >= 5, "Default snippets list should contain at least 5 presets");
+
+        List<SnippetManager.Snippet> custom = Arrays.asList(
+            new SnippetManager.Snippet("s1", "Con \\barra\t y tab", "echo \"hola\" && ls -la", true),
+            new SnippetManager.Snippet("s2", "Multi\nlinea", "cat <<'EOF'\nline2\r\nEOF", false)
+        );
+        String serialized = SnippetManager.serialize(custom);
+        List<SnippetManager.Snippet> restored = SnippetManager.deserialize(serialized);
+
+        check(restored.size() == 2, "Expected 2 deserialized snippets, got " + restored.size());
+        check("s1".equals(restored.get(0).id)
+            && "Con \\barra\t y tab".equals(restored.get(0).title)
+            && "echo \"hola\" && ls -la".equals(restored.get(0).command)
+            && restored.get(0).autoExecute,
+            "First snippet round-trip mismatch");
+        check("s2".equals(restored.get(1).id)
+            && "Multi\nlinea".equals(restored.get(1).title)
+            && "cat <<'EOF'\nline2\r\nEOF".equals(restored.get(1).command)
+            && !restored.get(1).autoExecute,
+            "Second snippet round-trip mismatch");
+        check(SnippetManager.deserialize("corrupt-line-without-tabs\n").isEmpty(),
+            "Malformed lines must be skipped safely");
+
+        check(Modifier.isPublic(TerminalSettings.class.getMethod("getSnippets").getModifiers()),
+            "TerminalSettings.getSnippets must be public");
+        check(Modifier.isPublic(TerminalSettings.class.getMethod("saveSnippets", List.class).getModifiers()),
+            "TerminalSettings.saveSnippets must be public");
+        check(ExtraKeysBarView.Listener.class.getMethod("onSwipeToTextInput") != null,
+            "ExtraKeysBarView.Listener.onSwipeToTextInput must exist");
+
+        System.out.println("[PASS] Test 17: SnippetManager serialization, defaults & Gboard swipe listener");
     }
 
     private static String fetchText(String urlStr) throws Exception {

@@ -18,7 +18,10 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.IBinder;
 import android.provider.Settings;
+import android.text.Editable;
+import android.text.InputType;
 import android.text.TextUtils;
+import android.text.TextWatcher;
 import android.util.Log;
 import android.util.TypedValue;
 import android.view.ContextMenu;
@@ -30,8 +33,10 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
+import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
@@ -53,6 +58,7 @@ import com.termux.view.TerminalViewClient;
 
 import java.io.File;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Properties;
@@ -102,6 +108,20 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
     private Button mDrawerWakeLockBtn;
     private Button mDrawerSetupStorageBtn;
 
+    // Terminal search & Gboard text input dock
+    private LinearLayout mSearchBar;
+    private EditText mSearchInput;
+    private TextView mSearchCountTv;
+    private TextView mSearchCaseBtn;
+    private List<TerminalSearch.Match> mSearchMatches = Collections.emptyList();
+    private int mSearchMatchIndex = -1;
+    private boolean mSearchCaseSensitive = false;
+    private LinearLayout mBottomExtraRow;
+    private TextView mToggleTextInputBtn;
+    private LinearLayout mTextInputBar;
+    private EditText mTextInputEdit;
+    private boolean mTextInputMode = false;
+
     // Integrated VNC Desktop controls
     private VncCanvasView mVncCanvas;
     private LinearLayout mDesktopOverlay;
@@ -121,6 +141,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
     private Button mDashBatteryOptBtn;
     private Button mDashNotifPermBtn;
     private Button mDashStoragePermBtn;
+    private Button mDashPhantomFixBtn;
 
     // Graphical Mode Card controls
     private RadioButton mUiCliRb;
@@ -335,6 +356,14 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         }
         if (isTerminalVisible() && mDrawerLayout != null && mDrawerLayout.isDrawerOpen()) {
             mDrawerLayout.closeDrawer();
+            return;
+        }
+        if (isTerminalVisible() && isSearchBarVisible()) {
+            hideSearchBar();
+            return;
+        }
+        if (isTerminalVisible() && isTextInputVisible()) {
+            setTextInputMode(false);
             return;
         }
         if (isTerminalVisible() && mTerminalView != null && mTerminalView.isSelectingText()) {
@@ -666,6 +695,15 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         storBtnLp.setMargins(0, dp(6), 0, 0);
         reqCard.addView(mDashStoragePermBtn, storBtnLp);
+
+        mDashPhantomFixBtn = makeActionButton("🛡 Corregir Phantom Killer (signal 9)", "#9E6A03", v ->
+            showPhantomKillerDialog());
+        mDashPhantomFixBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f);
+        mDashPhantomFixBtn.setVisibility(View.GONE);
+        LinearLayout.LayoutParams phantomBtnLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        phantomBtnLp.setMargins(0, dp(6), 0, 0);
+        reqCard.addView(mDashPhantomFixBtn, phantomBtnLp);
 
         container.addView(reqCard);
 
@@ -1067,12 +1105,19 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         pillLp.setMargins(dp(4), 0, dp(4), 0);
         mTopBar.addView(mChrootPill, pillLp);
 
+        mTopBar.addView(makeTopButton("🔍", v -> toggleSearchBar()));
+        mTopBar.addView(makeTopButton("⚡", v -> showSnippetsDialog()));
         mTopBar.addView(makeTopButton("⌨", v -> toggleSoftKeyboard()));
         mTopBar.addView(makeTopButton("📋", v -> pasteFromClipboard()));
         mTopBar.addView(makeTopButton("⚙", v -> showSettingsDialog()));
 
         mainContainer.addView(mTopBar, new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, dp(38)));
+
+        mSearchBar = buildSearchBarView();
+        mSearchBar.setVisibility(View.GONE);
+        mainContainer.addView(mSearchBar, new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         // Terminal view
         mTerminalView = new TerminalView(this, null);
@@ -1082,7 +1127,12 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         mainContainer.addView(mTerminalView, new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
 
-        // Extra keys bar docked at bottom above IME
+        // Extra keys + Text Input toggle dock above IME
+        mBottomExtraRow = new LinearLayout(this);
+        mBottomExtraRow.setOrientation(LinearLayout.HORIZONTAL);
+        mBottomExtraRow.setGravity(Gravity.CENTER_VERTICAL);
+        mBottomExtraRow.setBackgroundColor(Color.parseColor("#161B22"));
+
         mExtraKeys = new ExtraKeysBarView(this);
         mExtraKeys.setListener(new ExtraKeysBarView.Listener() {
             @Override
@@ -1094,8 +1144,35 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
             public void onModifiersChanged() {
                 mTerminalView.requestFocus();
             }
+
+            @Override
+            public void onSwipeToTextInput() {
+                setTextInputMode(true);
+            }
         });
-        mainContainer.addView(mExtraKeys, new LinearLayout.LayoutParams(
+        mBottomExtraRow.addView(mExtraKeys, new LinearLayout.LayoutParams(
+            0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        mToggleTextInputBtn = new TextView(this);
+        mToggleTextInputBtn.setText("📝");
+        mToggleTextInputBtn.setTextColor(Color.parseColor("#E6EDF3"));
+        mToggleTextInputBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        mToggleTextInputBtn.setGravity(Gravity.CENTER);
+        mToggleTextInputBtn.setMinimumWidth(dp(34));
+        mToggleTextInputBtn.setPadding(dp(4), 0, dp(4), 0);
+        mToggleTextInputBtn.setBackground(makePillBg("#21262D"));
+        mToggleTextInputBtn.setOnClickListener(v -> setTextInputMode(true));
+        LinearLayout.LayoutParams ttiLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT);
+        ttiLp.setMargins(dp(2), dp(2), dp(2), dp(2));
+        mBottomExtraRow.addView(mToggleTextInputBtn, ttiLp);
+
+        mainContainer.addView(mBottomExtraRow, new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        mTextInputBar = buildTextInputBarView();
+        mTextInputBar.setVisibility(View.GONE);
+        mainContainer.addView(mTextInputBar, new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         View drawerContent = buildDrawerContent();
@@ -1195,6 +1272,10 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         mDrawerSetupStorageBtn = makeDrawerActionButton("📁 Configurar almacenamiento (setup-storage)", "#21262D", v ->
             runSetupStorageFlow());
         actions.addView(mDrawerSetupStorageBtn);
+        actions.addView(makeDrawerActionButton("⚡ Snippets / Comandos rápidos", "#21262D", v -> {
+            mDrawerLayout.closeDrawer();
+            showSnippetsDialog();
+        }));
         actions.addView(makeDrawerActionButton("Panel de Inicio y Requisitos", "#1F6FEB", v -> {
             mDrawerLayout.closeDrawer();
             showDashboardView();
@@ -1214,11 +1295,11 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         TextView tv = new TextView(this);
         tv.setText(label);
         tv.setTextColor(Color.parseColor("#E6EDF3"));
-        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15.5f);
         tv.setGravity(Gravity.CENTER);
-        tv.setMinimumWidth(dp(34));
+        tv.setMinimumWidth(dp(28));
         tv.setMinimumHeight(dp(34));
-        tv.setPadding(dp(6), dp(2), dp(6), dp(2));
+        tv.setPadding(dp(4), dp(2), dp(4), dp(2));
         tv.setOnClickListener(clickListener);
         return tv;
     }
@@ -1538,6 +1619,9 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         }
         updateSessionTitle();
         refreshDrawerSessions();
+        if (isSearchBarVisible()) {
+            performTerminalSearch(false);
+        }
     }
 
     private void updateSessionTitle() {
@@ -1927,6 +2011,12 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         if (mDashStoragePermBtn != null) {
             mDashStoragePermBtn.setVisibility(r.sharedStorageGranted ? View.GONE : View.VISIBLE);
         }
+        if (mDashPhantomFixBtn != null) {
+            boolean showPhantom = r.phantomStatus != null
+                && r.phantomStatus.affectedApi
+                && !r.phantomStatus.knownMitigated;
+            mDashPhantomFixBtn.setVisibility(showPhantom ? View.VISIBLE : View.GONE);
+        }
 
         // 3. Graphical Mode Card update (Termux:X11 detection & recommendation)
         DesktopManager.DesktopStatus ds = r.desktopStatus;
@@ -2159,18 +2249,18 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
 
         if (rootSt.rootfsExists && rootSt.hasRoot) {
             String shortName = rootSt.debianPrettyName.contains("13") || rootSt.debianPrettyName.contains("trixie")
-                ? "Debian 13"
-                : "Debian 12";
-            mChrootPill.setText("⌂ Inicio • " + shortName);
+                ? "13"
+                : "12";
+            mChrootPill.setText("⌂ " + shortName);
             mChrootPill.setBackground(makePillBg("#238636"));
         } else if (prootSt.rootfsExists) {
-            mChrootPill.setText("⌂ Inicio • PRoot 12");
+            mChrootPill.setText("⌂ PRoot");
             mChrootPill.setBackground(makePillBg("#1F6FEB"));
         } else if (!r.hasRoot) {
-            mChrootPill.setText("⌂ Inicio • Sin root");
+            mChrootPill.setText("⌂ Inicio");
             mChrootPill.setBackground(makePillBg("#9E6A03"));
         } else {
-            mChrootPill.setText("⌂ Inicio • Instalar");
+            mChrootPill.setText("⌂ Inicio");
             mChrootPill.setBackground(makePillBg("#D70A53"));
         }
 
@@ -2904,6 +2994,20 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         storSettingsLp.setMargins(0, dp(6), 0, 0);
         content.addView(storageBtn, storSettingsLp);
 
+        if (Build.VERSION.SDK_INT >= PhantomProcessManager.MIN_AFFECTED_API) {
+            boolean phantomOk = mLastReport.phantomStatus != null && mLastReport.phantomStatus.knownMitigated;
+            Button phantomBtn = makeActionButton(
+                phantomOk ? "✓ Phantom Process Killer desactivado" : "🛡 Corregir Phantom Killer (signal 9)",
+                phantomOk ? "#238636" : "#9E6A03",
+                v -> showPhantomKillerDialog()
+            );
+            phantomBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+            LinearLayout.LayoutParams phLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            phLp.setMargins(0, dp(6), 0, 0);
+            content.addView(phantomBtn, phLp);
+        }
+
         ScrollView scroll = new ScrollView(this);
         scroll.addView(content);
 
@@ -2933,10 +3037,529 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
 
     private void applyExtraKeysMode(String mode, boolean notifyGeometry) {
         mExtraKeys.setMode(mode);
-        if (notifyGeometry) {
+        boolean hidden = TerminalSettings.EXTRA_KEYS_HIDDEN.equals(mode);
+        if (mBottomExtraRow != null) {
+            mBottomExtraRow.setVisibility((!hidden && !mTextInputMode) ? View.VISIBLE : View.GONE);
+        }
+        if (mTextInputBar != null) {
+            mTextInputBar.setVisibility((!hidden && mTextInputMode) ? View.VISIBLE : View.GONE);
+        }
+        if (notifyGeometry && mTerminalView != null) {
             mTerminalView.onToolbarGeometryChanged();
             mTerminalView.post(() -> mTerminalView.updateSize());
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase 1 UX: Terminal Search, Gboard Text Input, Snippets & Phantom Killer
+    // -------------------------------------------------------------------------
+
+    private LinearLayout buildSearchBarView() {
+        LinearLayout bar = new LinearLayout(this);
+        bar.setOrientation(LinearLayout.HORIZONTAL);
+        bar.setGravity(Gravity.CENTER_VERTICAL);
+        bar.setBackgroundColor(Color.parseColor("#161B22"));
+        bar.setPadding(dp(6), dp(4), dp(6), dp(4));
+
+        mSearchInput = new EditText(this);
+        mSearchInput.setHint("Buscar en terminal...");
+        mSearchInput.setHintTextColor(Color.parseColor("#8B949E"));
+        mSearchInput.setTextColor(Color.parseColor("#E6EDF3"));
+        mSearchInput.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        mSearchInput.setSingleLine(true);
+        mSearchInput.setImeOptions(EditorInfo.IME_ACTION_SEARCH);
+        mSearchInput.setBackground(makeRoundedBg("#0D1117", "#30363D", 6));
+        mSearchInput.setPadding(dp(8), dp(5), dp(8), dp(5));
+        mSearchInput.addTextChangedListener(new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
+            @Override public void onTextChanged(CharSequence s, int start, int before, int count) {}
+            @Override public void afterTextChanged(Editable s) {
+                performTerminalSearch(false);
+            }
+        });
+        mSearchInput.setOnEditorActionListener((v, actionId, event) -> {
+            if (actionId == EditorInfo.IME_ACTION_SEARCH
+                || (event != null && event.getKeyCode() == KeyEvent.KEYCODE_ENTER && event.getAction() == KeyEvent.ACTION_DOWN)) {
+                navigateSearchMatch(-1);
+                return true;
+            }
+            return false;
+        });
+        bar.addView(mSearchInput, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        mSearchCountTv = new TextView(this);
+        mSearchCountTv.setText("0/0");
+        mSearchCountTv.setTextColor(Color.parseColor("#8B949E"));
+        mSearchCountTv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
+        mSearchCountTv.setTypeface(Typeface.MONOSPACE);
+        mSearchCountTv.setPadding(dp(6), 0, dp(4), 0);
+        bar.addView(mSearchCountTv);
+
+        mSearchCaseBtn = makeSearchBarBtn("Aa", "#21262D", v -> {
+            mSearchCaseSensitive = !mSearchCaseSensitive;
+            mSearchCaseBtn.setBackground(makePillBg(mSearchCaseSensitive ? "#1F6FEB" : "#21262D"));
+            performTerminalSearch(false);
+        });
+        bar.addView(mSearchCaseBtn);
+        bar.addView(makeSearchBarBtn("▲", "#21262D", v -> navigateSearchMatch(-1)));
+        bar.addView(makeSearchBarBtn("▼", "#21262D", v -> navigateSearchMatch(1)));
+        bar.addView(makeSearchBarBtn("📋", "#21262D", v -> copyCurrentSearchLine()));
+        bar.addView(makeSearchBarBtn("✕", "#30363D", v -> hideSearchBar()));
+        return bar;
+    }
+
+    private TextView makeSearchBarBtn(String label, String bgHex, View.OnClickListener listener) {
+        TextView tv = new TextView(this);
+        tv.setText(label);
+        tv.setTextColor(Color.WHITE);
+        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        tv.setTypeface(Typeface.DEFAULT_BOLD);
+        tv.setGravity(Gravity.CENTER);
+        tv.setPadding(dp(7), dp(5), dp(7), dp(5));
+        tv.setBackground(makePillBg(bgHex));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.setMargins(dp(2), 0, dp(2), 0);
+        tv.setLayoutParams(lp);
+        tv.setOnClickListener(listener);
+        return tv;
+    }
+
+    private boolean isSearchBarVisible() {
+        return mSearchBar != null && mSearchBar.getVisibility() == View.VISIBLE;
+    }
+
+    private void toggleSearchBar() {
+        if (isSearchBarVisible()) {
+            hideSearchBar();
+        } else {
+            showSearchBar();
+        }
+    }
+
+    private void showSearchBar() {
+        if (mSearchBar == null) return;
+        mSearchBar.setVisibility(View.VISIBLE);
+        if (mTerminalView != null) {
+            mTerminalView.onToolbarGeometryChanged();
+            mTerminalView.post(() -> mTerminalView.updateSize());
+        }
+        if (mSearchInput != null) {
+            mSearchInput.requestFocus();
+            mSearchInput.selectAll();
+            InputMethodManager imm = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+            if (imm != null) {
+                imm.showSoftInput(mSearchInput, 0);
+            }
+            performTerminalSearch(true);
+        }
+    }
+
+    private void hideSearchBar() {
+        if (mSearchBar != null) {
+            mSearchBar.setVisibility(View.GONE);
+        }
+        mSearchMatches = Collections.emptyList();
+        mSearchMatchIndex = -1;
+        if (mSearchCountTv != null) {
+            mSearchCountTv.setText("0/0");
+        }
+        if (mTerminalView != null) {
+            mTerminalView.clearSearchHighlight();
+            mTerminalView.onToolbarGeometryChanged();
+            mTerminalView.post(() -> mTerminalView.updateSize());
+            mTerminalView.requestFocus();
+        }
+    }
+
+    private void performTerminalSearch(boolean jumpToLatest) {
+        if (mSearchInput == null || mTerminalView == null) return;
+        String query = mSearchInput.getText() != null ? mSearchInput.getText().toString() : "";
+        TerminalEmulator em = (mCurrentSession != null) ? mCurrentSession.getEmulator() : null;
+        if (query.isEmpty() || em == null) {
+            mSearchMatches = Collections.emptyList();
+            mSearchMatchIndex = -1;
+            if (mSearchCountTv != null) mSearchCountTv.setText("0/0");
+            mTerminalView.clearSearchHighlight();
+            return;
+        }
+        mSearchMatches = TerminalSearch.search(em, query, mSearchCaseSensitive);
+        if (mSearchMatches.isEmpty()) {
+            mSearchMatchIndex = -1;
+            if (mSearchCountTv != null) mSearchCountTv.setText("0/0");
+            mTerminalView.clearSearchHighlight();
+            return;
+        }
+        mSearchMatchIndex = jumpToLatest || mSearchMatchIndex < 0 || mSearchMatchIndex >= mSearchMatches.size()
+            ? (mSearchMatches.size() - 1)
+            : mSearchMatchIndex;
+        applyCurrentSearchMatch();
+    }
+
+    private void navigateSearchMatch(int delta) {
+        if (mSearchMatches.isEmpty()) {
+            performTerminalSearch(true);
+            return;
+        }
+        int total = mSearchMatches.size();
+        mSearchMatchIndex = (mSearchMatchIndex + delta + total) % total;
+        applyCurrentSearchMatch();
+    }
+
+    private void applyCurrentSearchMatch() {
+        if (mSearchMatches.isEmpty() || mSearchMatchIndex < 0 || mSearchMatchIndex >= mSearchMatches.size()) return;
+        TerminalSearch.Match m = mSearchMatches.get(mSearchMatchIndex);
+        if (mSearchCountTv != null) {
+            mSearchCountTv.setText((mSearchMatchIndex + 1) + "/" + mSearchMatches.size());
+        }
+        if (mTerminalView != null) {
+            mTerminalView.setSearchHighlight(m.absoluteRow, m.startCol, m.endCol);
+            mTerminalView.scrollToAbsoluteRow(m.absoluteRow);
+        }
+    }
+
+    private void copyCurrentSearchLine() {
+        if (mSearchMatches.isEmpty() || mSearchMatchIndex < 0 || mSearchMatchIndex >= mSearchMatches.size()) {
+            Toast.makeText(this, "No hay coincidencia seleccionada.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        TerminalSearch.Match m = mSearchMatches.get(mSearchMatchIndex);
+        ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+        if (cm != null) {
+            cm.setPrimaryClip(ClipData.newPlainText("DebianTerm Search", m.lineText.trim()));
+            Toast.makeText(this, "Línea copiada al portapapeles.", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private LinearLayout buildTextInputBarView() {
+        LinearLayout bar = new LinearLayout(this);
+        bar.setOrientation(LinearLayout.HORIZONTAL);
+        bar.setGravity(Gravity.CENTER_VERTICAL);
+        bar.setBackgroundColor(Color.parseColor("#161B22"));
+        bar.setPadding(dp(4), dp(4), dp(4), dp(4));
+
+        TextView backBtn = makeSearchBarBtn("⌨ Teclas", "#21262D", v -> setTextInputMode(false));
+        bar.addView(backBtn);
+
+        mTextInputEdit = new EditText(this);
+        mTextInputEdit.setHint("Escribe o dicta comando (Gboard)...");
+        mTextInputEdit.setHintTextColor(Color.parseColor("#8B949E"));
+        mTextInputEdit.setTextColor(Color.parseColor("#E6EDF3"));
+        mTextInputEdit.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f);
+        mTextInputEdit.setSingleLine(true);
+        mTextInputEdit.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_AUTO_CORRECT);
+        mTextInputEdit.setImeOptions(EditorInfo.IME_ACTION_SEND);
+        mTextInputEdit.setBackground(makeRoundedBg("#0D1117", "#30363D", 6));
+        mTextInputEdit.setPadding(dp(8), dp(6), dp(8), dp(6));
+        mTextInputEdit.setOnEditorActionListener((v, actionId, event) -> {
+            if (actionId == EditorInfo.IME_ACTION_SEND
+                || (event != null && event.getKeyCode() == KeyEvent.KEYCODE_ENTER && event.getAction() == KeyEvent.ACTION_DOWN)) {
+                sendTextInputToSession(true);
+                return true;
+            }
+            return false;
+        });
+        bar.addView(mTextInputEdit, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        TextView sendBtn = makeSearchBarBtn("↵ Enviar", "#238636", v -> sendTextInputToSession(true));
+        sendBtn.setOnLongClickListener(v -> {
+            sendTextInputToSession(false);
+            return true;
+        });
+        bar.addView(sendBtn);
+        return bar;
+    }
+
+    private boolean isTextInputVisible() {
+        return mTextInputMode && mTextInputBar != null && mTextInputBar.getVisibility() == View.VISIBLE;
+    }
+
+    private void setTextInputMode(boolean enabled) {
+        mTextInputMode = enabled;
+        boolean hidden = TerminalSettings.EXTRA_KEYS_HIDDEN.equals(mSettings.getExtraKeysMode());
+        if (mBottomExtraRow != null) {
+            mBottomExtraRow.setVisibility((!enabled && !hidden) ? View.VISIBLE : View.GONE);
+        }
+        if (mTextInputBar != null) {
+            mTextInputBar.setVisibility(enabled ? View.VISIBLE : View.GONE);
+        }
+        if (mTerminalView != null) {
+            mTerminalView.onToolbarGeometryChanged();
+            mTerminalView.post(() -> mTerminalView.updateSize());
+        }
+        if (enabled && mTextInputEdit != null) {
+            mTextInputEdit.requestFocus();
+            InputMethodManager imm = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+            if (imm != null) {
+                imm.showSoftInput(mTextInputEdit, 0);
+            }
+        } else if (mTerminalView != null) {
+            mTerminalView.requestFocus();
+        }
+    }
+
+    private void sendTextInputToSession(boolean executeEnter) {
+        if (mCurrentSession == null || mTextInputEdit == null) return;
+        String text = mTextInputEdit.getText() != null ? mTextInputEdit.getText().toString() : "";
+        if (text.isEmpty() && !executeEnter) return;
+        if (!text.isEmpty()) {
+            mCurrentSession.write(text);
+        }
+        if (executeEnter) {
+            mCurrentSession.write("\r");
+        }
+        mTextInputEdit.setText("");
+    }
+
+    private void showSnippetsDialog() {
+        final List<SnippetManager.Snippet> snippets = new ArrayList<>(mSettings.getSnippets());
+
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setPadding(dp(16), dp(12), dp(16), dp(8));
+
+        TextView hint = new TextView(this);
+        hint.setText("Toca un comando para enviarlo a la terminal activa:");
+        hint.setTextColor(Color.parseColor("#8B949E"));
+        hint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        hint.setPadding(0, 0, 0, dp(8));
+        root.addView(hint);
+
+        LinearLayout listContainer = new LinearLayout(this);
+        listContainer.setOrientation(LinearLayout.VERTICAL);
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(listContainer);
+        root.addView(scroll, new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(290)));
+
+        final AlertDialog dlg = new AlertDialog.Builder(this)
+            .setTitle("⚡ Snippets / Comandos rápidos")
+            .setView(root)
+            .setPositiveButton("+ Nuevo snippet", null)
+            .setNeutralButton("Restaurar", null)
+            .setNegativeButton("Cerrar", null)
+            .create();
+
+        final Runnable rebuildRows = new Runnable() {
+            @Override
+            public void run() {
+                listContainer.removeAllViews();
+                if (snippets.isEmpty()) {
+                    TextView emptyTv = new TextView(MainActivity.this);
+                    emptyTv.setText("No hay snippets guardados. Pulsa '+ Nuevo snippet'.");
+                    emptyTv.setTextColor(Color.parseColor("#8B949E"));
+                    emptyTv.setPadding(dp(4), dp(12), dp(4), dp(12));
+                    listContainer.addView(emptyTv);
+                    return;
+                }
+                for (int i = 0; i < snippets.size(); i++) {
+                    final int idx = i;
+                    final SnippetManager.Snippet sn = snippets.get(i);
+
+                    LinearLayout row = new LinearLayout(MainActivity.this);
+                    row.setOrientation(LinearLayout.HORIZONTAL);
+                    row.setGravity(Gravity.CENTER_VERTICAL);
+                    row.setBackground(makeRoundedBg("#161B22", "#30363D", 6));
+                    row.setPadding(dp(10), dp(8), dp(6), dp(8));
+                    LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                    rlp.setMargins(0, 0, 0, dp(6));
+                    row.setLayoutParams(rlp);
+
+                    LinearLayout textCol = new LinearLayout(MainActivity.this);
+                    textCol.setOrientation(LinearLayout.VERTICAL);
+                    TextView titleTv = new TextView(MainActivity.this);
+                    titleTv.setText(sn.title + (sn.autoExecute ? " ↵" : ""));
+                    titleTv.setTextColor(Color.parseColor("#E6EDF3"));
+                    titleTv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f);
+                    titleTv.setTypeface(Typeface.DEFAULT_BOLD);
+                    textCol.addView(titleTv);
+
+                    TextView cmdTv = new TextView(MainActivity.this);
+                    cmdTv.setText(sn.command);
+                    cmdTv.setTextColor(Color.parseColor("#8B949E"));
+                    cmdTv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
+                    cmdTv.setTypeface(Typeface.MONOSPACE);
+                    cmdTv.setSingleLine(true);
+                    cmdTv.setEllipsize(TextUtils.TruncateAt.END);
+                    textCol.addView(cmdTv);
+
+                    row.addView(textCol, new LinearLayout.LayoutParams(
+                        0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+                    TextView editBtn = makeSearchBarBtn("✎", "#21262D", v -> {
+                        dlg.dismiss();
+                        showEditSnippetDialog(snippets, idx);
+                    });
+                    row.addView(editBtn);
+
+                    TextView delBtn = makeSearchBarBtn("✕", "#30363D", v -> {
+                        snippets.remove(idx);
+                        mSettings.saveSnippets(snippets);
+                        this.run();
+                    });
+                    row.addView(delBtn);
+
+                    row.setOnClickListener(v -> {
+                        dlg.dismiss();
+                        if (mCurrentSession == null) {
+                            Toast.makeText(MainActivity.this,
+                                "Abre una terminal primero para ejecutar el snippet.", Toast.LENGTH_SHORT).show();
+                            return;
+                        }
+                        showTerminalView();
+                        mCurrentSession.write(sn.command + (sn.autoExecute ? "\r" : ""));
+                        if (mTerminalView != null) {
+                            mTerminalView.requestFocus();
+                        }
+                    });
+
+                    listContainer.addView(row);
+                }
+            }
+        };
+
+        rebuildRows.run();
+
+        dlg.setOnShowListener(d -> {
+            dlg.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+                dlg.dismiss();
+                showEditSnippetDialog(snippets, -1);
+            });
+            dlg.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(v -> {
+                snippets.clear();
+                snippets.addAll(SnippetManager.getDefaultSnippets());
+                mSettings.saveSnippets(snippets);
+                rebuildRows.run();
+                Toast.makeText(MainActivity.this, "Snippets restaurados.", Toast.LENGTH_SHORT).show();
+            });
+        });
+
+        dlg.show();
+    }
+
+    private void showEditSnippetDialog(final List<SnippetManager.Snippet> allSnippets, final int editIndex) {
+        final boolean isEdit = editIndex >= 0 && editIndex < allSnippets.size();
+        final SnippetManager.Snippet existing = isEdit ? allSnippets.get(editIndex) : null;
+
+        LinearLayout form = new LinearLayout(this);
+        form.setOrientation(LinearLayout.VERTICAL);
+        form.setPadding(dp(18), dp(14), dp(18), dp(8));
+
+        final EditText titleEt = new EditText(this);
+        titleEt.setHint("Nombre del snippet (ej. Reiniciar nginx)");
+        titleEt.setSingleLine(true);
+        if (existing != null) titleEt.setText(existing.title);
+        form.addView(titleEt);
+
+        final EditText cmdEt = new EditText(this);
+        cmdEt.setHint("Comando shell (ej. apt update)");
+        cmdEt.setTypeface(Typeface.MONOSPACE);
+        if (existing != null) cmdEt.setText(existing.command);
+        form.addView(cmdEt);
+
+        final CheckBox autoExecCb = new CheckBox(this);
+        autoExecCb.setText("Ejecutar automáticamente (enviar Enter)");
+        autoExecCb.setChecked(existing == null || existing.autoExecute);
+        form.addView(autoExecCb);
+
+        new AlertDialog.Builder(this)
+            .setTitle(isEdit ? "Editar snippet" : "Nuevo snippet")
+            .setView(form)
+            .setPositiveButton("Guardar", (d, w) -> {
+                String t = titleEt.getText().toString().trim();
+                String c = cmdEt.getText().toString();
+                if (t.isEmpty() && c.trim().isEmpty()) return;
+                if (t.isEmpty()) t = c.trim();
+                SnippetManager.Snippet updated = new SnippetManager.Snippet(
+                    existing != null ? existing.id : null, t, c, autoExecCb.isChecked());
+                if (isEdit) {
+                    allSnippets.set(editIndex, updated);
+                } else {
+                    allSnippets.add(updated);
+                }
+                mSettings.saveSnippets(allSnippets);
+                showSnippetsDialog();
+            })
+            .setNegativeButton("Cancelar", (d, w) -> showSnippetsDialog())
+            .show();
+    }
+
+    private void showPhantomKillerDialog() {
+        PhantomProcessManager.Status st = mLastReport.phantomStatus;
+        String current = st != null ? st.summary : "Estado desconocido";
+
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(dp(18), dp(12), dp(18), dp(8));
+
+        TextView info = new TextView(this);
+        info.setText("En Android 12–15, el sistema limita los procesos hijos en segundo plano (por defecto 32) y los cierra abruptamente con 'signal 9'.\n\nEstado actual: " + current);
+        info.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
+        content.addView(info);
+
+        TextView adbLabel = new TextView(this);
+        adbLabel.setText("\nComandos ADB (para equipos Sin Root):");
+        adbLabel.setTypeface(Typeface.DEFAULT_BOLD);
+        adbLabel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        content.addView(adbLabel);
+
+        TextView adbBox = new TextView(this);
+        adbBox.setText(PhantomProcessManager.getAdbFixCommands());
+        adbBox.setTypeface(Typeface.MONOSPACE);
+        adbBox.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        adbBox.setTextColor(Color.parseColor("#C9D1D9"));
+        adbBox.setBackgroundColor(Color.parseColor("#0D1117"));
+        adbBox.setPadding(dp(8), dp(8), dp(8), dp(8));
+        content.addView(adbBox);
+
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(content);
+
+        AlertDialog.Builder b = new AlertDialog.Builder(this)
+            .setTitle("🛡 Phantom Process Killer (Android 12+)")
+            .setView(scroll)
+            .setNeutralButton("Opciones desarrollador", (d, w) -> {
+                Toast.makeText(this,
+                    "Activa 'Desactivar restricciones de procesos secundarios' si aparece en Opciones de desarrollador.",
+                    Toast.LENGTH_LONG).show();
+                try {
+                    startActivity(new Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS));
+                } catch (ActivityNotFoundException | SecurityException e) {
+                    try {
+                        startActivity(new Intent(Settings.ACTION_SETTINGS));
+                    } catch (ActivityNotFoundException ignored) {
+                    }
+                }
+            })
+            .setNegativeButton("Cerrar", null);
+
+        if (mLastReport.hasRoot) {
+            b.setPositiveButton("Corregir con Root", (d, w) -> {
+                mBgExecutor.execute(() -> {
+                    ChrootManager.ExecResult res = PhantomProcessManager.applyRootFix();
+                    final SystemRequirements.Report fresh = SystemRequirements.runCheck(MainActivity.this, mSettings);
+                    runOnUiThread(() -> {
+                        mLastReport = fresh;
+                        renderDashboardReport(fresh);
+                        boolean ok = res.stdout != null && res.stdout.contains("PHANTOM_FIX_OK");
+                        Toast.makeText(MainActivity.this,
+                            ok ? "✓ Phantom Process Killer desactivado / límite elevado con root."
+                               : "Aviso aplicando fix: " + res.stderr,
+                            Toast.LENGTH_LONG).show();
+                    });
+                });
+            });
+        } else {
+            b.setPositiveButton("Copiar comandos ADB", (d, w) -> {
+                ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                if (cm != null) {
+                    cm.setPrimaryClip(ClipData.newPlainText("ADB Phantom Fix", PhantomProcessManager.getAdbFixCommands()));
+                    Toast.makeText(MainActivity.this, "Comandos ADB copiados al portapapeles.", Toast.LENGTH_SHORT).show();
+                }
+            });
+        }
+        b.show();
     }
 
     // -------------------------------------------------------------------------
@@ -3132,7 +3755,10 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
 
     @Override
     public boolean isTerminalViewSelected() {
-        return isTerminalVisible() && (mDrawerLayout == null || !mDrawerLayout.isDrawerOpen());
+        return isTerminalVisible()
+            && (mDrawerLayout == null || !mDrawerLayout.isDrawerOpen())
+            && !isSearchBarVisible()
+            && !isTextInputVisible();
     }
 
     @Override
@@ -3218,9 +3844,18 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
             mActiveDesktopSession = null;
         }
         if (mService != null && mService.hasSession(finishedSession)) {
-            if (finishedSession.getExitStatus() == 0) {
+            int exitStatus = finishedSession.getExitStatus();
+            if (exitStatus == 0) {
                 closeSession(finishedSession);
                 return;
+            }
+            if (exitStatus == -9 && Build.VERSION.SDK_INT >= PhantomProcessManager.MIN_AFFECTED_API && isTerminalVisible()) {
+                new AlertDialog.Builder(this)
+                    .setTitle("Sesión cerrada por Android (signal 9)")
+                    .setMessage("Es muy probable que el Phantom Process Killer de Android haya detenido esta sesión en segundo plano.\n\n¿Quieres ver cómo desactivarlo?")
+                    .setPositiveButton("Corregir / Ver guía", (d, w) -> showPhantomKillerDialog())
+                    .setNegativeButton("Cerrar aviso", null)
+                    .show();
             }
             mService.onSessionStateChanged();
         }

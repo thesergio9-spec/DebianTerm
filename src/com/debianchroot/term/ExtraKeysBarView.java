@@ -23,6 +23,7 @@ public final class ExtraKeysBarView extends GridLayout {
     public interface Listener {
         void onKeyButton(String keyCode, boolean ctrl, boolean alt);
         void onModifiersChanged();
+        void onSwipeToTextInput();
     }
 
     private enum ModState {
@@ -91,6 +92,10 @@ public final class ExtraKeysBarView extends GridLayout {
     private TextView mCtrlView;
     private TextView mAltView;
 
+    private float mSwipeDownX = 0f;
+    private float mSwipeDownY = 0f;
+    private boolean mSwipeTriggered = false;
+
     private int mBgColor = Color.parseColor("#161B22");
     private int mBtnColor = Color.parseColor("#21262D");
     private int mBtnPressedColor = Color.parseColor("#30363D");
@@ -104,6 +109,46 @@ public final class ExtraKeysBarView extends GridLayout {
         int pad = dp(2);
         setPadding(pad, pad, pad, pad);
         rebuildButtons();
+    }
+
+    @Override
+    public boolean onInterceptTouchEvent(MotionEvent ev) {
+        int action = ev.getActionMasked();
+        if (action == MotionEvent.ACTION_DOWN) {
+            mSwipeDownX = ev.getX();
+            mSwipeDownY = ev.getY();
+            mSwipeTriggered = false;
+        } else if (action == MotionEvent.ACTION_MOVE && !mSwipeTriggered) {
+            float dx = ev.getX() - mSwipeDownX;
+            float dy = ev.getY() - mSwipeDownY;
+            if (Math.abs(dx) >= dp(44) && Math.abs(dx) > Math.abs(dy) * 1.5f) {
+                mSwipeTriggered = true;
+                return true;
+            }
+        }
+        return super.onInterceptTouchEvent(ev);
+    }
+
+    @Override
+    public boolean onTouchEvent(MotionEvent ev) {
+        int action = ev.getActionMasked();
+        if (action == MotionEvent.ACTION_MOVE && !mSwipeTriggered) {
+            float dx = ev.getX() - mSwipeDownX;
+            float dy = ev.getY() - mSwipeDownY;
+            if (Math.abs(dx) >= dp(44) && Math.abs(dx) > Math.abs(dy) * 1.5f) {
+                mSwipeTriggered = true;
+            }
+        }
+        if ((action == MotionEvent.ACTION_MOVE || action == MotionEvent.ACTION_UP) && mSwipeTriggered) {
+            if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_MOVE) {
+                if (mListener != null) {
+                    mListener.onSwipeToTextInput();
+                }
+                mSwipeTriggered = false;
+            }
+            return true;
+        }
+        return super.onTouchEvent(ev);
     }
 
     public void setListener(Listener listener) {

@@ -74,6 +74,7 @@ public final class SystemRequirements {
         public boolean ignoringBatteryOptimizations;
         public boolean notificationsEnabled;
         public boolean sharedStorageGranted;
+        public PhantomProcessManager.Status phantomStatus;
 
         public Report(List<CheckItem> items) {
             this.items = Collections.unmodifiableList(new ArrayList<>(items));
@@ -319,6 +320,7 @@ public final class SystemRequirements {
         boolean ignoringDoze = DebianTermService.isIgnoringBatteryOptimizations(context);
         boolean notifOk = DebianTermService.areNotificationsEnabled(context);
         boolean storageGranted = ProotManager.hasSharedStorageAccess(context);
+        PhantomProcessManager.Status phantomSt = PhantomProcessManager.inspect(context, report.hasRoot);
 
         List<CheckItem> fullItems = new ArrayList<>(report.items);
         if (deskSt.termuxX11Installed) {
@@ -380,6 +382,33 @@ public final class SystemRequirements {
                 Status.WARN
             ));
         }
+        if (!phantomSt.affectedApi) {
+            fullItems.add(new CheckItem(
+                "phantom",
+                "Procesos en segundo plano (Phantom)",
+                phantomSt.summary,
+                "Tu versión de Android no tiene Phantom Process Killer.",
+                Status.PASS
+            ));
+        } else if (phantomSt.knownMitigated) {
+            fullItems.add(new CheckItem(
+                "phantom",
+                "Phantom Process Killer (Android 12+)",
+                phantomSt.summary,
+                "Protegido contra cierres inesperados (signal 9) en sesiones largas y PRoot.",
+                Status.PASS
+            ));
+        } else {
+            fullItems.add(new CheckItem(
+                "phantom",
+                "Phantom Process Killer (Android 12+)",
+                phantomSt.summary,
+                report.hasRoot
+                    ? "Puede matar procesos con signal 9. Pulsa 'Corregir Phantom Killer' para desactivarlo con root."
+                    : "Puede matar sesiones PRoot con signal 9. Pulsa el botón de abajo para desactivarlo en Opciones de desarrollador o ADB.",
+                Status.WARN
+            ));
+        }
         Report fullReport = new Report(fullItems);
         fullReport.apiLevel = report.apiLevel;
         fullReport.androidVersion = report.androidVersion;
@@ -401,6 +430,7 @@ public final class SystemRequirements {
         fullReport.ignoringBatteryOptimizations = ignoringDoze;
         fullReport.notificationsEnabled = notifOk;
         fullReport.sharedStorageGranted = storageGranted;
+        fullReport.phantomStatus = phantomSt;
         return fullReport;
     }
 

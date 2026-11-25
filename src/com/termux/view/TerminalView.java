@@ -8,6 +8,7 @@ import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.ContextWrapper;
 import android.graphics.Canvas;
+import android.graphics.Paint;
 import android.graphics.Typeface;
 import android.os.Build;
 import android.os.Handler;
@@ -148,6 +149,13 @@ public final class TerminalView extends View {
     private String[] mAutoFillHints = new String[0];
 
     private final boolean mAccessibilityEnabled;
+
+    private boolean mHasSearchHighlight = false;
+    private long mSearchHighlightAbsRow = 0L;
+    private int mSearchHighlightStartCol = 0;
+    private int mSearchHighlightEndCol = 0;
+    private final Paint mSearchHighlightFillPaint = new Paint();
+    private final Paint mSearchHighlightStrokePaint = new Paint();
 
     private static final String LOG_TAG = "TerminalView";
 
@@ -298,6 +306,11 @@ public final class TerminalView extends View {
         mMinimumFlingVelocity = viewConfig.getScaledMinimumFlingVelocity();
         AccessibilityManager am = (AccessibilityManager) context.getSystemService(Context.ACCESSIBILITY_SERVICE);
         mAccessibilityEnabled = am.isEnabled();
+
+        mSearchHighlightFillPaint.setColor(0x66FFB300);
+        mSearchHighlightStrokePaint.setColor(0xFFFFB300);
+        mSearchHighlightStrokePaint.setStyle(Paint.Style.STROKE);
+        mSearchHighlightStrokePaint.setStrokeWidth(2.5f);
     }
 
 
@@ -344,6 +357,7 @@ public final class TerminalView extends View {
         mTermSession = session;
         mEmulator = null;
         mCombiningAccent = 0;
+        mHasSearchHighlight = false;
 
         setTopRow(0, false);
 
@@ -1257,9 +1271,51 @@ public final class TerminalView extends View {
 
             mRenderer.render(mEmulator, canvas, mTopRow, mSubRowOffsetPixels, sel[0], sel[1], sel[2], sel[3]);
 
+            if (mHasSearchHighlight && mRenderer != null && mEmulator != null) {
+                int extRow = (int) (mSearchHighlightAbsRow - mEmulator.getScreen().getBaseAbsoluteRow());
+                int visRows = mEmulator.getVisualRows();
+                if (extRow >= mTopRow && extRow <= mTopRow + visRows) {
+                    boolean hasSub = mSubRowOffsetPixels > 0.5f && mTopRow < mEmulator.getMaxTopRow();
+                    float subOffset = hasSub ? mSubRowOffsetPixels : 0f;
+                    float y = mRenderer.mFontLineSpacingAndAscent - subOffset + (extRow - mTopRow + 1) * mRenderer.mFontLineSpacing;
+                    float top = y - mRenderer.mFontLineSpacing;
+                    float left = Math.max(0f, mSearchHighlightStartCol * mRenderer.mFontWidth);
+                    float right = Math.min(getWidth(), Math.max(left + mRenderer.mFontWidth, mSearchHighlightEndCol * mRenderer.mFontWidth));
+                    canvas.drawRect(left, top, right, y, mSearchHighlightFillPaint);
+                    canvas.drawRect(left, top, right, y, mSearchHighlightStrokePaint);
+                }
+            }
+
             // render the text selection handles
             renderTextSelection();
         }
+    }
+
+    public void setSearchHighlight(long absoluteRow, int startCol, int endCol) {
+        mSearchHighlightAbsRow = absoluteRow;
+        mSearchHighlightStartCol = startCol;
+        mSearchHighlightEndCol = endCol;
+        mHasSearchHighlight = true;
+        invalidate();
+    }
+
+    public void clearSearchHighlight() {
+        if (mHasSearchHighlight) {
+            mHasSearchHighlight = false;
+            invalidate();
+        }
+    }
+
+    public void scrollToAbsoluteRow(long absoluteRow) {
+        if (mEmulator == null || mRenderer == null || mRenderer.mFontLineSpacing <= 0) return;
+        int extRow = (int) (absoluteRow - mEmulator.getScreen().getBaseAbsoluteRow());
+        int minTop = -mEmulator.getScreen().getActiveTranscriptRows();
+        int maxTop = mEmulator.getMaxTopRow();
+        int desiredTop = extRow - Math.max(1, mEmulator.getVisualRows() / 3);
+        int clampedTop = Math.max(minTop, Math.min(maxTop, desiredTop));
+        mScroller.forceFinished(true);
+        setTopRow(clampedTop, true);
+        invalidate();
     }
 
     public TerminalSession getCurrentSession() {

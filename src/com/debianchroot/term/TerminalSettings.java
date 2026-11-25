@@ -29,6 +29,7 @@ public final class TerminalSettings {
     private static final String KEY_GUI_BACKEND = "gui_backend";
     private static final String KEY_GUI_RESOLUTION = "gui_resolution";
     private static final String KEY_AUTO_WAKELOCK = "auto_wakelock";
+    private static final String KEY_SNIPPETS_DATA = "snippets_data_v1";
 
     public static final String MODE_ROOT = "root";
     public static final String MODE_PROOT = "proot";
@@ -202,6 +203,17 @@ public final class TerminalSettings {
 
     public void setAutoWakeLockEnabled(boolean enabled) {
         mPrefs.edit().putBoolean(KEY_AUTO_WAKELOCK, enabled).apply();
+    }
+
+    public java.util.List<SnippetManager.Snippet> getSnippets() {
+        if (!mPrefs.contains(KEY_SNIPPETS_DATA)) {
+            return SnippetManager.getDefaultSnippets();
+        }
+        return SnippetManager.deserialize(mPrefs.getString(KEY_SNIPPETS_DATA, ""));
+    }
+
+    public void saveSnippets(java.util.List<SnippetManager.Snippet> snippets) {
+        mPrefs.edit().putString(KEY_SNIPPETS_DATA, SnippetManager.serialize(snippets)).apply();
     }
 
     public boolean isProotDisableSeccomp() {
