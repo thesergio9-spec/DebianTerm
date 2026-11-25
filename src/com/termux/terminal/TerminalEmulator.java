@@ -87,6 +87,10 @@ public final class TerminalEmulator {
     private static final int ESC_CSI_UNSUPPORTED_PARAMETER_BYTE = 22;
     /** Escape processing: ESC [ <parameter bytes> <intermediate bytes> */
     private static final int ESC_CSI_UNSUPPORTED_INTERMEDIATE_BYTE = 23;
+    /** Escape processing: Inside DCS Sixel payload (`ESC P ... q <data>`). */
+    private static final int ESC_DCS_SIXEL = 24;
+    /** Escape processing: Inside DCS Sixel payload after seeing ESC. */
+    private static final int ESC_DCS_SIXEL_ESC = 25;
 
     /** The number of parameter arguments including colon separated sub-parameters. */
     private static final int MAX_ESCAPE_PARAMETERS = 32;
@@ -131,6 +135,10 @@ public final class TerminalEmulator {
     private static final int DECSET_BIT_RECTANGULAR_CHANGEATTRIBUTE = 1 << 12;
     /** DECSET 2026 - Synchronized Output (https://gist.github.com/christianparpart/d8a62cc1ab659194337d73e399004036). */
     private static final int DECSET_BIT_SYNCHRONIZED_OUTPUT = 1 << 13;
+    /** DECSET 80 - Sixel display mode (set = fixed at (0,0) no scroll; reset = inline scrolling). */
+    private static final int DECSET_BIT_SIXEL_DISPLAY_MODE = 1 << 14;
+    /** DECSET 1070 - Use private color registers for each Sixel graphic. */
+    private static final int DECSET_BIT_SIXEL_PRIVATE_COLOR_REGISTERS = 1 << 15;
 
 
     private String mTitle;
@@ -289,6 +297,9 @@ public final class TerminalEmulator {
 
     public final TerminalColors mColors = new TerminalColors();
 
+    private SixelDecoder mSixelDecoder = null;
+    private boolean mSixelEnabled = true;
+
     private static final String LOG_TAG = "TerminalEmulator";
 
     private boolean isDecsetInternalBitSet(int bit) {
@@ -339,6 +350,10 @@ public final class TerminalEmulator {
                 return DECSET_BIT_BRACKETED_PASTE_MODE;
             case 2026:
                 return DECSET_BIT_SYNCHRONIZED_OUTPUT;
+            case 80:
+                return DECSET_BIT_SIXEL_DISPLAY_MODE;
+            case 1070:
+                return DECSET_BIT_SIXEL_PRIVATE_COLOR_REGISTERS;
             default:
                 return -1;
             // throw new IllegalArgumentException("Unsupported decset: " + decsetBit);
@@ -614,6 +629,12 @@ public final class TerminalEmulator {
             return;
         } else if (mEscapeState == ESC_APC_ESCAPE) {
             doApcEscape(b);
+            return;
+        } else if (mEscapeState == ESC_DCS_SIXEL) {
+            doSixel(b);
+            return;
+        } else if (mEscapeState == ESC_DCS_SIXEL_ESC) {
+            doSixelEsc(b);
             return;
         }
 
@@ -1066,6 +1087,10 @@ public final class TerminalEmulator {
             }
             break;
             default:
+                if (b == 'q' && isSixelDcsHeader(mOSCOrDeviceControlArgs)) {
+                    startSixelSequence();
+                    return;
+                }
                 if (mOSCOrDeviceControlArgs.length() > MAX_OSC_STRING_LENGTH) {
                     // Too long.
                     mOSCOrDeviceControlArgs.setLength(0);
@@ -1075,6 +1100,117 @@ public final class TerminalEmulator {
                     continueSequence(mEscapeState);
                 }
         }
+    }
+
+    private static boolean isSixelDcsHeader(CharSequence args) {
+        if (args == null) return true;
+        int len = args.length();
+        for (int i = 0; i < len; i++) {
+            char c = args.charAt(i);
+            if ((c < '0' || c > '9') && c != ';') {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private void startSixelSequence() {
+        int p2 = 0;
+        String hdr = mOSCOrDeviceControlArgs.toString();
+        mOSCOrDeviceControlArgs.setLength(0);
+        if (!hdr.isEmpty()) {
+            String[] parts = hdr.split(";", -1);
+            if (parts.length >= 2 && !parts[1].isEmpty()) {
+                try {
+                    p2 = Integer.parseInt(parts[1]);
+                } catch (NumberFormatException ignored) {
+                }
+            }
+        }
+        boolean transparentBg = (p2 == 1);
+        mSixelDecoder = mSixelEnabled
+            ? new SixelDecoder(transparentBg, mColors.mCurrentColors[TextStyle.COLOR_INDEX_BACKGROUND])
+            : null;
+        continueSequence(ESC_DCS_SIXEL);
+    }
+
+    private void doSixel(int b) {
+        if (b == 27) {
+            continueSequence(ESC_DCS_SIXEL_ESC);
+            return;
+        }
+        if (b == 0x9C) {
+            finishSixelSequence();
+            return;
+        }
+        if (b == 24 || b == 26) {
+            mSixelDecoder = null;
+            finishSequence();
+            return;
+        }
+        if (mSixelDecoder != null) {
+            mSixelDecoder.feed(b);
+        }
+        continueSequence(ESC_DCS_SIXEL);
+    }
+
+    private void doSixelEsc(int b) {
+        if (b == '\\') {
+            finishSixelSequence();
+        } else if (b == 27) {
+            continueSequence(ESC_DCS_SIXEL_ESC);
+        } else {
+            continueSequence(ESC_DCS_SIXEL);
+        }
+    }
+
+    private void finishSixelSequence() {
+        SixelDecoder dec = mSixelDecoder;
+        mSixelDecoder = null;
+        finishSequence();
+        if (dec == null || !mSixelEnabled) {
+            return;
+        }
+        SixelImage img = dec.finish();
+        if (img == null) {
+            return;
+        }
+
+        int cellW = Math.max(1, mCellWidthPixels);
+        int cellH = Math.max(1, mCellHeightPixels);
+        boolean fixedMode = isDecsetInternalBitSet(DECSET_BIT_SIXEL_DISPLAY_MODE);
+        int startRow = fixedMode ? 0 : mCursorRow;
+        int startCol = fixedMode ? 0 : mCursorCol;
+
+        float maxDisplayW = Math.max(cellW, (mColumns - startCol) * (float) cellW);
+        float scale = (img.widthPx > maxDisplayW) ? (maxDisplayW / img.widthPx) : 1.0f;
+        int displayW = Math.max(1, Math.round(img.widthPx * scale));
+        int displayH = Math.max(1, Math.round(img.heightPx * scale));
+
+        img.rowSpan = Math.max(1, (displayH + cellH - 1) / cellH);
+        img.colSpan = Math.max(1, (displayW + cellW - 1) / cellW);
+        img.anchorCol = startCol;
+        img.anchorAbsoluteRow = mScreen.getBaseAbsoluteRow() + startRow;
+
+        if (isAlternateBufferActive()) {
+            mScreen.clearSixelImagesInExternalRange(startRow, startRow + img.rowSpan);
+        }
+        mScreen.addSixelImage(img);
+
+        if (!fixedMode) {
+            for (int i = 0; i < img.rowSpan; i++) {
+                doLinefeed();
+            }
+            setCursorCol(mLeftMargin);
+        }
+    }
+
+    public void setSixelEnabled(boolean enabled) {
+        mSixelEnabled = enabled;
+    }
+
+    public boolean isSixelEnabled() {
+        return mSixelEnabled;
     }
 
     /**
@@ -1215,6 +1351,26 @@ public final class TerminalEmulator {
                     }
                 }
                 break;
+            case 'S': { // XTSMGRAPHICS: CSI ? Pi ; Pa ; Pv S
+                int pi = getArg(0, 0, false);
+                int pa = getArg(1, 0, false);
+                if (pi == 1) {
+                    if (mSixelEnabled && (pa == 1 || pa == 2 || pa == 3)) {
+                        mSession.write("\033[?1;0;256S");
+                    } else {
+                        mSession.write("\033[?1;3;0S");
+                    }
+                } else if (pi == 2) {
+                    if (mSixelEnabled && (pa == 1 || pa == 2 || pa == 3)) {
+                        int pxW = Math.max(1, mColumns * Math.max(1, mCellWidthPixels));
+                        int pxH = Math.max(1, mRows * Math.max(1, mCellHeightPixels));
+                        mSession.write(String.format(Locale.US, "\033[?2;0;%d;%dS", pxW, pxH));
+                    } else {
+                        mSession.write("\033[?2;3;0S");
+                    }
+                }
+                break;
+            }
             case '$':
                 continueSequence(ESC_CSI_QUESTIONMARK_ARG_DOLLAR);
                 return;
@@ -1309,11 +1465,16 @@ public final class TerminalEmulator {
                     // Check if buffer size needs to be updated:
                     if (resized) resizeScreen();
                     // Clear new screen if alt buffer:
-                    if (newScreen == mAltBuffer)
+                    if (newScreen == mAltBuffer) {
+                        newScreen.clearAllSixelImages();
                         newScreen.blockSet(0, 0, mColumns, mRows, ' ', getStyle());
+                    }
                 }
                 break;
             }
+            case 80: // Sixel display mode
+            case 1070: // Private color registers
+                break;
             case 2004:
                 // Bracketed paste mode - setting bit is enough.
                 break;
@@ -1490,6 +1651,8 @@ public final class TerminalEmulator {
                 break;
             case 'c': // RIS - Reset to Initial State (http://vt100.net/docs/vt510-rm/RIS).
                 reset();
+                mMainBuffer.clearAllSixelImages();
+                mAltBuffer.clearAllSixelImages();
                 mMainBuffer.clearTranscript();
                 mScrollCounter = 0;
                 pinViewportToBottom();
@@ -1639,14 +1802,17 @@ public final class TerminalEmulator {
                     case 0: // Erase from the active position to the end of the screen, inclusive (default).
                         blockClear(mCursorCol, mCursorRow, mColumns - mCursorCol);
                         blockClear(0, mCursorRow + 1, mColumns, mRows - (mCursorRow + 1));
+                        mScreen.clearSixelImagesInExternalRange(mCursorRow, mRows);
                         break;
                     case 1: // Erase from start of the screen to the active position, inclusive.
                         blockClear(0, 0, mColumns, mCursorRow);
                         blockClear(0, mCursorRow, mCursorCol + 1);
+                        mScreen.clearSixelImagesInExternalRange(0, mCursorRow + 1);
                         break;
                     case 2: // Erase all of the display - all lines are erased, changed to single-width, and the cursor does not
                         // move..
                         blockClear(0, 0, mColumns, mRows);
+                        mScreen.clearSixelImagesInExternalRange(0, mRows);
                         break;
                     case 3: // Delete all lines saved in the scrollback buffer (xterm etc)
                         mMainBuffer.clearTranscript();
@@ -1773,10 +1939,12 @@ public final class TerminalEmulator {
                 for (int i = 0; i < numRepeat; i++) emitCodePoint(mLastEmittedCodePoint);
                 break;
             case 'c': // Primary Device Attributes (http://www.vt100.net/docs/vt510-rm/DA1) if argument is missing or zero.
-                // The important part that may still be used by some (tmux stores this value but does not currently use it)
-                // is the first response parameter identifying the terminal service class, where we send 64 for "vt420".
-                // This is followed by a list of attributes which is probably unused by applications. Send like xterm.
-                if (getArg0(0) == 0) mSession.write("\033[?64;1;2;6;9;15;18;21;22c");
+                // Param 4 announces Sixel graphics capability when enabled.
+                if (getArg0(0) == 0) {
+                    mSession.write(mSixelEnabled
+                        ? "\033[?64;1;2;4;6;9;15;18;21;22c"
+                        : "\033[?64;1;2;6;9;15;18;21;22c");
+                }
                 break;
             case 'd': // ESC [ Pn d - Vert Position Absolute
                 setCursorRow(Math.min(Math.max(1, getArg0(1)), mRows) - 1);
@@ -2701,6 +2869,7 @@ public final class TerminalEmulator {
         mArgIndex = 0;
         mContinueSequence = false;
         mEscapeState = ESC_NONE;
+        mSixelDecoder = null;
         mSyncOutputStartNs = 0L;
         mInsertMode = false;
         mTopMargin = mLeftMargin = 0;
@@ -2720,6 +2889,7 @@ public final class TerminalEmulator {
         // Initial wrap-around is not accurate but makes terminal more useful, especially on a small screen:
         setDecsetinternalBit(DECSET_BIT_AUTOWRAP, true);
         setDecsetinternalBit(DECSET_BIT_CURSOR_ENABLED, true);
+        setDecsetinternalBit(DECSET_BIT_SIXEL_PRIVATE_COLOR_REGISTERS, true);
         mSavedDecSetFlags = mSavedStateMain.mSavedDecFlags = mSavedStateAlt.mSavedDecFlags = mCurrentDecSetFlags;
 
         // XXX: Should we set terminal driver back to IUTF8 with termios?

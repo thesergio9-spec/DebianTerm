@@ -1,4 +1,5 @@
 import com.debianchroot.term.BackupManager;
+import com.debianchroot.term.BootReceiver;
 import com.debianchroot.term.ChrootInstaller;
 import com.debianchroot.term.ChrootManager;
 import com.debianchroot.term.DebianDocumentsProvider;
@@ -13,6 +14,8 @@ import com.debianchroot.term.SystemRequirements;
 import com.debianchroot.term.TarExtractor;
 import com.debianchroot.term.TerminalSearch;
 import com.debianchroot.term.TerminalSettings;
+import com.termux.terminal.SixelDecoder;
+import com.termux.terminal.SixelImage;
 import com.termux.terminal.TerminalColorScheme;
 import com.termux.terminal.TerminalEmulator;
 import com.termux.terminal.TerminalOutput;
@@ -70,6 +73,9 @@ import java.util.zip.Deflater;
  * 18) DebianDocumentsProvider (SAF) path traversal guard, external symlink blocking, MIME types & Manifest
  * 19) BackupManager pure-Java .tar.gz round-trip (perms, PAX >110 chars, symlinks, exclusions, metadata)
  * 20) ExtraKeysBarView custom spec/presets parser, bundled Nerd Font TTF & Phase 2 settings API
+ * 21) BootReceiver autostart mode resolution, POSIX boot script (sh -n) & Manifest BOOT_COMPLETED
+ * 22) SixelDecoder pure-Java parser (RGB, HLS, raster attributes, RLE repeat, safety bounds)
+ * 23) TerminalEmulator Sixel DCS integration (DA1 ;4, XTSMGRAPHICS, cursor/scrollback anchoring, alt-screen, clear)
  */
 public final class VerifyAll {
 
@@ -145,7 +151,10 @@ public final class VerifyAll {
         testDocumentsProviderSafety();
         testBackupManagerTarGzRoundTrip();
         testExtraKeysCustomSpecAndFonts();
-        System.out.println("ALL 20 VERIFICATION TESTS PASSED.");
+        testBootAutostartLogicAndManifest();
+        testSixelDecoderCore();
+        testTerminalEmulatorSixelIntegration();
+        System.out.println("ALL 23 VERIFICATION TESTS PASSED.");
     }
 
     private static void testDecset2026() {
@@ -1057,8 +1066,6 @@ public final class VerifyAll {
         }
 
         String manifest = new String(Files.readAllBytes(Paths.get("AndroidManifest.xml")), StandardCharsets.UTF_8);
-        check(manifest.contains("android:versionCode=\"8\"") && manifest.contains("android:versionName=\"2.3.0\""),
-            "AndroidManifest must bump versionCode=8 / versionName=2.3.0");
         check(manifest.contains(".DebianDocumentsProvider")
             && manifest.contains("com.debianchroot.term.documents")
             && manifest.contains("android.permission.MANAGE_DOCUMENTS")
@@ -1227,6 +1234,174 @@ public final class VerifyAll {
             "BackupManager.backupRootHome must be public");
 
         System.out.println("[PASS] Test 20: ExtraKeys custom spec/presets, bundled Nerd Font TTF & Phase 2 API");
+    }
+
+    private static void testBootAutostartLogicAndManifest() throws Exception {
+        check(Boolean.TRUE.equals(BootReceiver.resolveBootMode(TerminalSettings.BOOT_TARGET_ROOT, TerminalSettings.MODE_PROOT, true, true, true)),
+            "Explicit root boot target must select Root when available");
+        check(BootReceiver.resolveBootMode(TerminalSettings.BOOT_TARGET_ROOT, TerminalSettings.MODE_PROOT, false, true, true) == null,
+            "Explicit root boot target without su must return null");
+        check(Boolean.FALSE.equals(BootReceiver.resolveBootMode(TerminalSettings.BOOT_TARGET_PROOT, TerminalSettings.MODE_ROOT, true, true, true)),
+            "Explicit proot boot target must select PRoot");
+        check(Boolean.FALSE.equals(BootReceiver.resolveBootMode(TerminalSettings.BOOT_TARGET_AUTO, TerminalSettings.MODE_PROOT, true, true, true)),
+            "Auto boot target with PRoot preferred must choose PRoot");
+        check(Boolean.FALSE.equals(BootReceiver.resolveBootMode(TerminalSettings.BOOT_TARGET_AUTO, TerminalSettings.MODE_ROOT, false, false, true)),
+            "Auto boot target must fall back to PRoot when Root is unavailable");
+        check(BootReceiver.resolveBootMode(TerminalSettings.BOOT_TARGET_AUTO, TerminalSettings.MODE_ROOT, false, false, false) == null,
+            "Auto boot target with no Debian installed must return null");
+
+        String trickyScript = "# comentario\necho 'hola $HOME' && echo \"__DEBIANTERM_BOOT_EOF__\"\nservice ssh status || true\n";
+        String bootKeep = BootReceiver.buildBootCommand(trickyScript, true);
+        String bootExit = BootReceiver.buildBootCommand("# solo comentarios\n", false);
+        check(bootKeep.contains("/root/.debianterm/boot/*")
+            && bootKeep.contains("exec /bin/bash -l")
+            && !bootKeep.contains("tee "),
+            "Keep-alive boot command must scan boot dir, avoid blocking pipe tee, and exec bash");
+        check(bootExit.contains("exit \"$BOOT_RC\"") && !bootExit.contains("/bin/sh <<'"),
+            "Comment-only boot command should skip heredoc and exit with BOOT_RC");
+
+        for (int i = 0; i < 2; i++) {
+            String cmd = (i == 0) ? bootKeep : bootExit;
+            Path tmp = Paths.get("/tmp/test-boot-cmd-" + i + ".sh");
+            Files.write(tmp, cmd.getBytes(StandardCharsets.UTF_8));
+            try {
+                Process p = new ProcessBuilder("sh", "-n", tmp.toString()).start();
+                check(p.waitFor() == 0, "Boot command sh -n failed (" + i + ")");
+            } finally {
+                Files.deleteIfExists(tmp);
+            }
+        }
+
+        String manifest = new String(Files.readAllBytes(Paths.get("AndroidManifest.xml")), StandardCharsets.UTF_8);
+        check(manifest.contains("android:versionCode=\"9\"") && manifest.contains("android:versionName=\"2.4.0\""),
+            "AndroidManifest must bump versionCode=9 / versionName=2.4.0");
+        check(manifest.contains("android.permission.RECEIVE_BOOT_COMPLETED")
+            && manifest.contains(".BootReceiver")
+            && manifest.contains("android.intent.action.BOOT_COMPLETED"),
+            "AndroidManifest must register BootReceiver and RECEIVE_BOOT_COMPLETED");
+
+        String bootAction = (String) DebianTermService.class.getField("ACTION_RUN_BOOT_TASKS").get(null);
+        check("com.debianchroot.term.ACTION_RUN_BOOT_TASKS".equals(bootAction),
+            "Unexpected ACTION_RUN_BOOT_TASKS: " + bootAction);
+        check(Modifier.isPublic(TerminalSettings.class.getMethod("isBootAutostartEnabled").getModifiers()),
+            "TerminalSettings.isBootAutostartEnabled must be public");
+        check(Modifier.isPublic(TerminalSettings.class.getMethod("setBootAutostartEnabled", boolean.class).getModifiers()),
+            "TerminalSettings.setBootAutostartEnabled must be public");
+        check(Modifier.isPublic(TerminalSettings.class.getMethod("isSixelEnabled").getModifiers()),
+            "TerminalSettings.isSixelEnabled must be public");
+        check(Modifier.isPublic(TerminalSettings.class.getMethod("setSixelEnabled", boolean.class).getModifiers()),
+            "TerminalSettings.setSixelEnabled must be public");
+
+        System.out.println("[PASS] Test 21: BootReceiver resolution, POSIX boot script (sh -n) & Manifest");
+    }
+
+    private static void testSixelDecoderCore() {
+        SixelDecoder dec = new SixelDecoder(true, 0xFF000000);
+        String seq = "\"1;1;12;12#1;2;100;0;0#2;1;240;50;100#1!6~-#2!6~";
+        for (int i = 0; i < seq.length(); i++) {
+            dec.feed(seq.charAt(i));
+        }
+        SixelImage img = dec.finish();
+        check(img != null && img.widthPx == 12 && img.heightPx == 12,
+            "Sixel image expected 12x12, got " + (img == null ? "null" : (img.widthPx + "x" + img.heightPx)));
+        check(img.pixels[0] == 0xFFFF0000, "Pixel (0,0) RGB red expected 0xFFFF0000, got " + Integer.toHexString(img.pixels[0]));
+        check(img.pixels[6] == 0x00000000, "Transparent right gap expected 0x00000000");
+        check(img.pixels[6 * 12] == 0xFF00FF00, "Pixel (0,6) VT340 HLS H=240 green expected 0xFF00FF00, got " + Integer.toHexString(img.pixels[6 * 12]));
+
+        SixelDecoder opaque = new SixelDecoder(false, 0xFF112233);
+        String opSeq = "#3;2;0;0;100!4~$" + "!2C";
+        for (int i = 0; i < opSeq.length(); i++) {
+            opaque.feed(opSeq.charAt(i));
+        }
+        SixelImage opImg = opaque.finish();
+        check(opImg != null && opImg.widthPx == 4 && opImg.heightPx == 6,
+            "Opaque Sixel without raster expected 4x6");
+        check(opImg.pixels[0] == 0xFF0000FF && opImg.pixels[2 * 4 + 1] == 0xFF0000FF,
+            "Opaque blue pixels mismatch");
+
+        SixelDecoder huge = new SixelDecoder(true, 0xFF000000);
+        String hugeSeq = "#1;2;100;100;100!50000~";
+        for (int i = 0; i < hugeSeq.length(); i++) {
+            huge.feed(hugeSeq.charAt(i));
+        }
+        SixelImage capped = huge.finish();
+        check(capped != null && capped.widthPx == SixelDecoder.MAX_WIDTH,
+            "Excessive repeat must cap at MAX_WIDTH=" + SixelDecoder.MAX_WIDTH);
+
+        SixelDecoder demo = new SixelDecoder(true, 0xFF000000);
+        String demoSeq = SixelDecoder.generateDemoSixelSequence();
+        int qIdx = demoSeq.indexOf('q');
+        int stIdx = demoSeq.lastIndexOf("\033\\");
+        check(qIdx > 0 && stIdx > qIdx, "Demo Sixel sequence malformed");
+        for (int i = qIdx + 1; i < stIdx; i++) {
+            demo.feed(demoSeq.charAt(i));
+        }
+        SixelImage demoImg = demo.finish();
+        check(demoImg != null && demoImg.widthPx == 240 && demoImg.heightPx == 72,
+            "Demo Sixel must decode to 240x72");
+
+        System.out.println("[PASS] Test 22: SixelDecoder RGB, HLS, raster attrs, RLE & safety cap");
+    }
+
+    private static void testTerminalEmulatorSixelIntegration() {
+        RecordingOutput out = new RecordingOutput();
+        TerminalEmulator em = new TerminalEmulator(out, 80, 24, 10, 20, 200, new StubSessionClient());
+        check(em.isSixelEnabled(), "Sixel should default enabled");
+
+        feed(em, "\033[c");
+        String daOn = out.drainAscii();
+        check(daOn.contains(";4;"), "DA1 must advertise Sixel (;4;) when enabled: " + daOn);
+
+        em.setSixelEnabled(false);
+        feed(em, "\033[c");
+        String daOff = out.drainAscii();
+        check(!daOff.contains(";4;"), "DA1 must omit ;4; when Sixel disabled: " + daOff);
+        em.setSixelEnabled(true);
+
+        feed(em, "\033[?1;1;0S");
+        String regReply = out.drainAscii();
+        check("\033[?1;0;256S".equals(regReply), "XTSMGRAPHICS color registers mismatch: " + regReply);
+
+        feed(em, "\033[?2;1;0S");
+        String geomReply = out.drainAscii();
+        check("\033[?2;0;800;480S".equals(geomReply), "XTSMGRAPHICS geometry mismatch: " + geomReply);
+
+        feed(em, "\r\nline1\r\n");
+        int rowBefore = em.getCursorRow();
+        long absBefore = em.getScreen().getBaseAbsoluteRow() + rowBefore;
+        feed(em, "\033P0;1q\"1;1;40;40#1;2;100;50;0!40~-\033\\");
+        List<SixelImage> imgs = em.getScreen().getSixelImages();
+        check(imgs.size() == 1, "Expected 1 SixelImage in screen buffer, got " + imgs.size());
+        SixelImage img = imgs.get(0);
+        check(img.anchorAbsoluteRow == absBefore && img.rowSpan == 2,
+            "Sixel image anchor/span mismatch: abs=" + img.anchorAbsoluteRow + " span=" + img.rowSpan);
+        check(em.getCursorRow() == rowBefore + 2 && em.getCursorCol() == 0,
+            "Cursor must advance 2 rows below 40px Sixel (cellH=20), got row=" + em.getCursorRow());
+
+        StringBuilder more = new StringBuilder();
+        for (int i = 0; i < 30; i++) {
+            more.append("scroll-line-").append(i).append("\r\n");
+        }
+        feed(em, more.toString());
+        check(em.getScreen().getSixelImages().size() == 1 && img.anchorAbsoluteRow == absBefore,
+            "Sixel anchorAbsoluteRow must stay fixed while screen scrolls into history");
+
+        feed(em, "\033[?1049h");
+        check(em.isAlternateBufferActive() && em.getScreen().getSixelImages().isEmpty(),
+            "Alt screen must isolate Sixel list");
+        feed(em, SixelDecoder.generateDemoSixelSequence());
+        check(em.getScreen().getSixelImages().size() == 1, "Alt screen should hold its own Sixel");
+        feed(em, "\033[2J");
+        check(em.getScreen().getSixelImages().isEmpty(), "CSI 2 J must clear visible Sixel images");
+
+        feed(em, "\033[?1049l");
+        check(!em.isAlternateBufferActive() && em.getScreen().getSixelImages().size() == 1,
+            "Main screen Sixel must survive alt screen exit");
+
+        feed(em, "\033c");
+        check(em.getScreen().getSixelImages().isEmpty(), "ESC c (RIS) must clear all Sixel images");
+
+        System.out.println("[PASS] Test 23: TerminalEmulator Sixel DCS, DA1/XTSMGRAPHICS & scrollback anchoring");
     }
 
     private static String fetchText(String urlStr) throws Exception {

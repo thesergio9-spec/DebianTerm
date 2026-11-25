@@ -1,15 +1,20 @@
 package com.termux.view;
 
+import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Paint;
 import android.graphics.PorterDuff;
+import android.graphics.RectF;
 import android.graphics.Typeface;
 
+import com.termux.terminal.SixelImage;
 import com.termux.terminal.TerminalBuffer;
 import com.termux.terminal.TerminalEmulator;
 import com.termux.terminal.TerminalRow;
 import com.termux.terminal.TextStyle;
 import com.termux.terminal.WcWidth;
+
+import java.util.List;
 
 /**
  * Renderer of a {@link TerminalEmulator} into a {@link Canvas}.
@@ -21,6 +26,8 @@ public final class TerminalRenderer {
     final int mTextSize;
     final Typeface mTypeface;
     private final Paint mTextPaint = new Paint();
+    private final Paint mImagePaint = new Paint(Paint.FILTER_BITMAP_FLAG);
+    private final RectF mImageDestRect = new RectF();
 
     /** The width of a single mono spaced character obtained by {@link Paint#measureText(String)} on a single 'X'. */
     final float mFontWidth;
@@ -169,6 +176,36 @@ public final class TerminalRenderer {
             }
             drawTextRun(canvas, line, palette, heightOffset, lastRunStartColumn, columnWidthSinceLastRun, lastRunStartIndex, charsSinceLastRun,
                 measuredWidthForRun, cursorColor, cursorShape, lastRunStyle, reverseVideo || invertCursorTextColor || lastRunInsideSelection);
+        }
+
+        List<SixelImage> sixelImages = screen.getSixelImages();
+        if (!sixelImages.isEmpty()) {
+            long baseAbsRow = screen.getBaseAbsoluteRow();
+            float originY = mFontLineSpacingAndAscent - (hasSubRowOffset ? subRowOffsetPx : 0f);
+            for (int idx = 0; idx < sixelImages.size(); idx++) {
+                SixelImage img = sixelImages.get(idx);
+                if (img == null || img.pixels == null || img.widthPx <= 0 || img.heightPx <= 0
+                    || img.pixels.length < img.widthPx * img.heightPx) {
+                    continue;
+                }
+                int imgExtRow = (int) (img.anchorAbsoluteRow - baseAbsRow);
+                if (imgExtRow + img.rowSpan <= topRow || imgExtRow >= endRow) {
+                    continue;
+                }
+                Bitmap bmp = (img.cachedBitmap instanceof Bitmap) ? (Bitmap) img.cachedBitmap : null;
+                if (bmp == null || bmp.isRecycled()) {
+                    bmp = Bitmap.createBitmap(img.pixels, img.widthPx, img.heightPx, Bitmap.Config.ARGB_8888);
+                    img.cachedBitmap = bmp;
+                }
+                float left = img.anchorCol * mFontWidth;
+                float top = originY + (imgExtRow - topRow) * mFontLineSpacing;
+                float maxAvailW = Math.max(mFontWidth, (columns - img.anchorCol) * mFontWidth);
+                float scale = (img.widthPx > maxAvailW) ? (maxAvailW / img.widthPx) : 1.0f;
+                float drawW = img.widthPx * scale;
+                float drawH = img.heightPx * scale;
+                mImageDestRect.set(left, top, left + drawW, top + drawH);
+                canvas.drawBitmap(bmp, null, mImageDestRect, mImagePaint);
+            }
         }
 
         if (hasSubRowOffset) {

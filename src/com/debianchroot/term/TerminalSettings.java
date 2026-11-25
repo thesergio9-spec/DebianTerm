@@ -36,9 +36,25 @@ public final class TerminalSettings {
     private static final String KEY_FONT_ID = "font_id";
     private static final String KEY_CUSTOM_EXTRA_KEYS = "custom_extra_keys_v1";
     private static final String KEY_MATERIAL_YOU = "material_you_enabled";
+    private static final String KEY_BOOT_AUTOSTART_ENABLED = "boot_autostart_enabled";
+    private static final String KEY_BOOT_AUTOSTART_TARGET = "boot_autostart_target";
+    private static final String KEY_BOOT_AUTOSTART_SCRIPT = "boot_autostart_script";
+    private static final String KEY_BOOT_AUTOSTART_WAKELOCK = "boot_autostart_wakelock";
+    private static final String KEY_BOOT_AUTOSTART_KEEP_SESSION = "boot_autostart_keep_session";
+    private static final String KEY_SIXEL_ENABLED = "sixel_enabled";
 
     public static final String MODE_ROOT = "root";
     public static final String MODE_PROOT = "proot";
+
+    public static final String BOOT_TARGET_AUTO = "auto";
+    public static final String BOOT_TARGET_ROOT = "root";
+    public static final String BOOT_TARGET_PROOT = "proot";
+
+    public static final String DEFAULT_BOOT_SCRIPT =
+        "# Comandos ejecutados automáticamente al encender Android\n" +
+        "# También se ejecutan scripts colocados en ~/.debianterm/boot/*.sh\n" +
+        "# Ejemplo:\n" +
+        "# service ssh start\n";
 
     public static final String UI_MODE_CLI = "cli";
     public static final String UI_MODE_GUI = "gui";
@@ -275,6 +291,62 @@ public final class TerminalSettings {
         mPrefs.edit().putBoolean(KEY_MATERIAL_YOU, enabled).apply();
     }
 
+    public boolean isBootAutostartEnabled() {
+        return mPrefs.getBoolean(KEY_BOOT_AUTOSTART_ENABLED, false);
+    }
+
+    public void setBootAutostartEnabled(boolean enabled) {
+        mPrefs.edit().putBoolean(KEY_BOOT_AUTOSTART_ENABLED, enabled).apply();
+    }
+
+    public String getBootAutostartTarget() {
+        String t = mPrefs.getString(KEY_BOOT_AUTOSTART_TARGET, BOOT_TARGET_AUTO);
+        if (BOOT_TARGET_ROOT.equals(t) || BOOT_TARGET_PROOT.equals(t)) {
+            return t;
+        }
+        return BOOT_TARGET_AUTO;
+    }
+
+    public void setBootAutostartTarget(String target) {
+        String clean = BOOT_TARGET_AUTO;
+        if (BOOT_TARGET_ROOT.equals(target) || BOOT_TARGET_PROOT.equals(target)) {
+            clean = target;
+        }
+        mPrefs.edit().putString(KEY_BOOT_AUTOSTART_TARGET, clean).apply();
+    }
+
+    public String getBootAutostartScript() {
+        return mPrefs.getString(KEY_BOOT_AUTOSTART_SCRIPT, DEFAULT_BOOT_SCRIPT);
+    }
+
+    public void setBootAutostartScript(String script) {
+        mPrefs.edit().putString(KEY_BOOT_AUTOSTART_SCRIPT, script == null ? "" : script).apply();
+    }
+
+    public boolean isBootAutostartWakeLock() {
+        return mPrefs.getBoolean(KEY_BOOT_AUTOSTART_WAKELOCK, true);
+    }
+
+    public void setBootAutostartWakeLock(boolean enabled) {
+        mPrefs.edit().putBoolean(KEY_BOOT_AUTOSTART_WAKELOCK, enabled).apply();
+    }
+
+    public boolean isBootAutostartKeepSession() {
+        return mPrefs.getBoolean(KEY_BOOT_AUTOSTART_KEEP_SESSION, true);
+    }
+
+    public void setBootAutostartKeepSession(boolean enabled) {
+        mPrefs.edit().putBoolean(KEY_BOOT_AUTOSTART_KEEP_SESSION, enabled).apply();
+    }
+
+    public boolean isSixelEnabled() {
+        return mPrefs.getBoolean(KEY_SIXEL_ENABLED, true);
+    }
+
+    public void setSixelEnabled(boolean enabled) {
+        mPrefs.edit().putBoolean(KEY_SIXEL_ENABLED, enabled).apply();
+    }
+
     public static byte[] serializePropertiesMap(Properties props) {
         if (props == null) return new byte[0];
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
@@ -310,6 +382,12 @@ public final class TerminalSettings {
         p.setProperty(KEY_DESKTOP_ENV, getDesktopEnv());
         p.setProperty(KEY_GUI_BACKEND, getGuiBackend());
         p.setProperty(KEY_GUI_RESOLUTION, getGuiResolution());
+        p.setProperty(KEY_BOOT_AUTOSTART_ENABLED, Boolean.toString(isBootAutostartEnabled()));
+        p.setProperty(KEY_BOOT_AUTOSTART_TARGET, getBootAutostartTarget());
+        p.setProperty(KEY_BOOT_AUTOSTART_SCRIPT, getBootAutostartScript());
+        p.setProperty(KEY_BOOT_AUTOSTART_WAKELOCK, Boolean.toString(isBootAutostartWakeLock()));
+        p.setProperty(KEY_BOOT_AUTOSTART_KEEP_SESSION, Boolean.toString(isBootAutostartKeepSession()));
+        p.setProperty(KEY_SIXEL_ENABLED, Boolean.toString(isSixelEnabled()));
         p.setProperty(KEY_SNIPPETS_DATA, SnippetManager.serialize(getSnippets()));
         return serializePropertiesMap(p);
     }
@@ -337,6 +415,20 @@ public final class TerminalSettings {
         if (p.containsKey(KEY_DESKTOP_ENV)) setDesktopEnv(p.getProperty(KEY_DESKTOP_ENV));
         if (p.containsKey(KEY_GUI_BACKEND)) setGuiBackend(p.getProperty(KEY_GUI_BACKEND));
         if (p.containsKey(KEY_GUI_RESOLUTION)) setGuiResolution(p.getProperty(KEY_GUI_RESOLUTION));
+        if (p.containsKey(KEY_BOOT_AUTOSTART_ENABLED)) {
+            setBootAutostartEnabled(Boolean.parseBoolean(p.getProperty(KEY_BOOT_AUTOSTART_ENABLED)));
+        }
+        if (p.containsKey(KEY_BOOT_AUTOSTART_TARGET)) setBootAutostartTarget(p.getProperty(KEY_BOOT_AUTOSTART_TARGET));
+        if (p.containsKey(KEY_BOOT_AUTOSTART_SCRIPT)) setBootAutostartScript(p.getProperty(KEY_BOOT_AUTOSTART_SCRIPT));
+        if (p.containsKey(KEY_BOOT_AUTOSTART_WAKELOCK)) {
+            setBootAutostartWakeLock(Boolean.parseBoolean(p.getProperty(KEY_BOOT_AUTOSTART_WAKELOCK)));
+        }
+        if (p.containsKey(KEY_BOOT_AUTOSTART_KEEP_SESSION)) {
+            setBootAutostartKeepSession(Boolean.parseBoolean(p.getProperty(KEY_BOOT_AUTOSTART_KEEP_SESSION)));
+        }
+        if (p.containsKey(KEY_SIXEL_ENABLED)) {
+            setSixelEnabled(Boolean.parseBoolean(p.getProperty(KEY_SIXEL_ENABLED)));
+        }
         if (p.containsKey(KEY_SNIPPETS_DATA)) {
             saveSnippets(SnippetManager.deserialize(p.getProperty(KEY_SNIPPETS_DATA)));
         }

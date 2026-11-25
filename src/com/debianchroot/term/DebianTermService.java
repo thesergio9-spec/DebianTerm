@@ -13,9 +13,11 @@ import android.os.Build;
 import android.os.IBinder;
 import android.os.PowerManager;
 
+import com.termux.terminal.TerminalEmulator;
 import com.termux.terminal.TerminalSession;
 import com.termux.terminal.TerminalSessionClient;
 
+import java.io.File;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
@@ -24,6 +26,8 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * Foreground service hosting terminal sessions across Activity lifecycle changes.
@@ -35,6 +39,7 @@ public final class DebianTermService extends Service {
 
     public static final String ACTION_STOP_ALL = "com.debianchroot.term.ACTION_STOP_ALL";
     public static final String ACTION_TOGGLE_WAKELOCK = "com.debianchroot.term.ACTION_TOGGLE_WAKELOCK";
+    public static final String ACTION_RUN_BOOT_TASKS = "com.debianchroot.term.ACTION_RUN_BOOT_TASKS";
 
     private static final int DEFAULT_TRANSCRIPT_ROWS = 4000;
     private static final long GRACEFUL_EXIT_TIMEOUT_MS = 1500L;
@@ -70,6 +75,7 @@ public final class DebianTermService extends Service {
     private boolean mIsForeground = false;
     private ServiceEventListener mEventListener;
     private final android.os.Handler mMainHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+    private final ExecutorService mBootExecutor = Executors.newSingleThreadExecutor();
 
     public static boolean isIgnoringBatteryOptimizations(Context context) {
         if (context == null) return false;
@@ -142,6 +148,13 @@ public final class DebianTermService extends Service {
                 if (!mSessions.isEmpty()) {
                     toggleWakeLock();
                 }
+            } else if (ACTION_RUN_BOOT_TASKS.equals(action)) {
+                if (!mIsForeground) {
+                    startForeground(NOTIFICATION_ID, buildNotification());
+                    mIsForeground = true;
+                }
+                handleBootTasksAsync();
+                return START_NOT_STICKY;
             }
         }
         if (mSessions.isEmpty()) {
@@ -164,6 +177,7 @@ public final class DebianTermService extends Service {
 
     @Override
     public void onDestroy() {
+        mBootExecutor.shutdownNow();
         releaseWakeLock();
         for (TerminalSession s : new ArrayList<>(mSessions)) {
             s.finishGracefully(500L);
@@ -747,5 +761,109 @@ public final class DebianTermService extends Service {
             .addAction(0, getString(R.string.action_exit), exitPi);
 
         return builder.build();
+    }
+
+    private void handleBootTasksAsync() {
+        for (TerminalSession s : mSessions) {
+            String name = mSessionNames.get(s);
+            if (name != null && name.startsWith("Autoarranque (") && s.isRunning()) {
+                return;
+            }
+        }
+
+        mBootExecutor.execute(() -> {
+            final TerminalSettings settings = new TerminalSettings(DebianTermService.this);
+            if (!settings.isBootAutostartEnabled()) {
+                mMainHandler.post(this::stopForegroundAndSelfIfEmpty);
+                return;
+            }
+
+            final String targetPref = settings.getBootAutostartTarget();
+            final String chrootPath = settings.getChrootPath();
+            final String scriptPath = settings.getEntryScriptPath();
+
+            boolean hasRoot = false;
+            boolean rootInstalled = false;
+            if (!TerminalSettings.BOOT_TARGET_PROOT.equals(targetPref)) {
+                ChrootManager.ChrootStatus rootSt = ChrootManager.inspectStatus(chrootPath, scriptPath);
+                hasRoot = rootSt.hasRoot;
+                rootInstalled = rootSt.rootfsExists;
+            }
+
+            File prootDir = ProotManager.getRootfsDir(DebianTermService.this);
+            boolean prootInstalled = prootDir.isDirectory() && new File(prootDir, "bin/bash").exists();
+
+            final Boolean useRoot = BootReceiver.resolveBootMode(
+                targetPref, settings.getInstallMode(), hasRoot, rootInstalled, prootInstalled);
+            if (useRoot == null) {
+                mMainHandler.post(this::stopForegroundAndSelfIfEmpty);
+                return;
+            }
+
+            final String bootCmd = BootReceiver.buildBootCommand(
+                settings.getBootAutostartScript(), settings.isBootAutostartKeepSession());
+            final String label = "Autoarranque (" + (useRoot ? "Root" : "Sin Root") + ")";
+
+            mMainHandler.post(() -> {
+                for (TerminalSession s : mSessions) {
+                    String n = mSessionNames.get(s);
+                    if (n != null && n.startsWith("Autoarranque (") && s.isRunning()) {
+                        return;
+                    }
+                }
+                TerminalSession session = createDebianCommandSession(
+                    useRoot,
+                    chrootPath,
+                    scriptPath,
+                    bootCmd,
+                    label,
+                    SessionKind.COMMAND,
+                    createHeadlessBootClient()
+                );
+                if (session.getEmulator() == null) {
+                    session.initializeEmulator(80, 24, 16, 32);
+                }
+                TerminalEmulator em = session.getEmulator();
+                if (em != null) {
+                    em.setSixelEnabled(settings.isSixelEnabled());
+                }
+                if (settings.isBootAutostartWakeLock() && !isWakeLockHeld()) {
+                    setWakeLockEnabled(true);
+                } else {
+                    updateNotification();
+                }
+            });
+        });
+    }
+
+    private TerminalSessionClient createHeadlessBootClient() {
+        return new TerminalSessionClient() {
+            @Override public void onTextChanged(TerminalSession changedSession) {}
+            @Override
+            public void onTitleChanged(TerminalSession changedSession) {
+                updateNotification();
+            }
+            @Override
+            public void onSessionFinished(TerminalSession finishedSession) {
+                if (finishedSession != null && finishedSession.getExitStatus() == 0) {
+                    removeSession(finishedSession);
+                } else {
+                    onSessionStateChanged();
+                }
+            }
+            @Override public void onCopyTextToClipboard(TerminalSession session, String text) {}
+            @Override public void onPasteTextFromClipboard(TerminalSession session) {}
+            @Override public void onBell(TerminalSession session) {}
+            @Override public void onColorsChanged(TerminalSession session) {}
+            @Override public void onTerminalCursorStateChange(boolean state) {}
+            @Override public Integer getTerminalCursorStyle() { return TerminalEmulator.TERMINAL_CURSOR_STYLE_BLOCK; }
+            @Override public void logError(String tag, String message) {}
+            @Override public void logWarn(String tag, String message) {}
+            @Override public void logInfo(String tag, String message) {}
+            @Override public void logDebug(String tag, String message) {}
+            @Override public void logVerbose(String tag, String message) {}
+            @Override public void logStackTraceWithMessage(String tag, String message, Exception e) {}
+            @Override public void logStackTrace(String tag, Exception e) {}
+        };
     }
 }

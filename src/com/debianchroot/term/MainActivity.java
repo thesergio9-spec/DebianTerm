@@ -50,6 +50,7 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import com.termux.terminal.KeyHandler;
+import com.termux.terminal.SixelDecoder;
 import com.termux.terminal.TerminalColors;
 import com.termux.terminal.TerminalEmulator;
 import com.termux.terminal.TerminalSession;
@@ -62,6 +63,7 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -1306,6 +1308,10 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
             mDrawerLayout.closeDrawer();
             showBackupRestoreDialog();
         }));
+        actions.addView(makeDrawerActionButton("🚀 Autoarranque al iniciar", "#21262D", v -> {
+            mDrawerLayout.closeDrawer();
+            showBootAutostartDialog();
+        }));
         actions.addView(makeDrawerActionButton("Panel de Inicio y Requisitos", "#1F6FEB", v -> {
             mDrawerLayout.closeDrawer();
             showDashboardView();
@@ -1643,6 +1649,10 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
     private void switchToSession(TerminalSession session) {
         if (session == null) return;
         mCurrentSession = session;
+        TerminalEmulator em = session.getEmulator();
+        if (em != null) {
+            em.setSixelEnabled(mSettings.isSixelEnabled());
+        }
         mTerminalView.attachSession(session);
         if (isTerminalVisible()) {
             mTerminalView.requestFocus();
@@ -3134,6 +3144,41 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         bakLp.setMargins(0, dp(6), 0, 0);
         content.addView(backupBtn, bakLp);
 
+        // 8. Gráficos Sixel y Autoarranque
+        TextView advHeader = new TextView(this);
+        advHeader.setText("Gráficos Sixel y Autoarranque:");
+        advHeader.setTypeface(Typeface.DEFAULT_BOLD);
+        advHeader.setPadding(0, dp(14), 0, dp(4));
+        content.addView(advHeader);
+
+        Switch sixelSwitch = new Switch(this);
+        sixelSwitch.setText("🖼 Gráficos Sixel inline (img2sixel, chafa, lsix)");
+        sixelSwitch.setChecked(mSettings.isSixelEnabled());
+        sixelSwitch.setOnCheckedChangeListener((btn, isChecked) -> {
+            mSettings.setSixelEnabled(isChecked);
+            applySixelSettingToAllSessions();
+        });
+        content.addView(sixelSwitch);
+
+        final Button testSixelBtn = makeActionButton("🖼 Probar imagen Sixel en terminal", "#21262D", null);
+        testSixelBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        LinearLayout.LayoutParams sxLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        sxLp.setMargins(0, dp(6), 0, 0);
+        content.addView(testSixelBtn, sxLp);
+
+        final boolean bootActive = mSettings.isBootAutostartEnabled();
+        final Button bootBtn = makeActionButton(
+            bootActive ? "🚀 Autoarranque al iniciar: ACTIVO" : "🚀 Configurar autoarranque (BOOT_COMPLETED)",
+            bootActive ? "#238636" : "#21262D",
+            null
+        );
+        bootBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        LinearLayout.LayoutParams btLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        btLp.setMargins(0, dp(6), 0, 0);
+        content.addView(bootBtn, btLp);
+
         ScrollView scroll = new ScrollView(this);
         scroll.addView(content);
 
@@ -3154,6 +3199,14 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         backupBtn.setOnClickListener(v -> {
             settingsDlg.dismiss();
             showBackupRestoreDialog();
+        });
+        testSixelBtn.setOnClickListener(v -> {
+            settingsDlg.dismiss();
+            testDemoSixelInTerminal();
+        });
+        bootBtn.setOnClickListener(v -> {
+            settingsDlg.dismiss();
+            showBootAutostartDialog();
         });
 
         settingsDlg.show();
@@ -4427,6 +4480,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
                                 mExtraKeys.setCustomSpec(mSettings.getCustomExtraKeysSpec());
                                 applyExtraKeysMode(mSettings.getExtraKeysMode(), true);
                                 mExtraKeys.setHapticEnabled(mSettings.isHapticEnabled());
+                                applySixelSettingToAllSessions();
                                 Toast.makeText(MainActivity.this,
                                     "✓ Archivos y ajustes restaurados.", Toast.LENGTH_SHORT).show();
                             }
@@ -4438,6 +4492,208 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
                         "✓ Restauración completada (" + finalRes.entriesCount + " entradas).",
                         Toast.LENGTH_LONG).show();
                 }
+            });
+        });
+    }
+
+    private void applySixelSettingToAllSessions() {
+        boolean enabled = mSettings.isSixelEnabled();
+        if (mService != null) {
+            for (TerminalSession s : mService.getSessions()) {
+                TerminalEmulator em = s.getEmulator();
+                if (em != null) {
+                    em.setSixelEnabled(enabled);
+                }
+            }
+        }
+    }
+
+    private void testDemoSixelInTerminal() {
+        if (mCurrentSession == null || mCurrentSession.getEmulator() == null) {
+            Toast.makeText(this, "Abre una sesión de terminal primero para visualizar Sixel.", Toast.LENGTH_LONG).show();
+            return;
+        }
+        if (!mSettings.isSixelEnabled()) {
+            mSettings.setSixelEnabled(true);
+            applySixelSettingToAllSessions();
+        }
+        TerminalEmulator em = mCurrentSession.getEmulator();
+        em.setSixelEnabled(true);
+        showTerminalView();
+        String payload = "\r\n\033[1;35m[DebianTerm Sixel Demo 240x72]\033[0m\r\n"
+            + SixelDecoder.generateDemoSixelSequence()
+            + "\r\n";
+        byte[] bytes = payload.getBytes(StandardCharsets.UTF_8);
+        em.append(bytes, bytes.length);
+        if (mTerminalView != null) {
+            mTerminalView.onScreenUpdated();
+            mTerminalView.requestFocus();
+        }
+    }
+
+    private void showBootAutostartDialog() {
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(dp(16), dp(12), dp(16), dp(8));
+
+        final Switch enableSwitch = new Switch(this);
+        enableSwitch.setText("Ejecutar script automáticamente al encender Android (BOOT_COMPLETED)");
+        enableSwitch.setChecked(mSettings.isBootAutostartEnabled());
+        content.addView(enableSwitch);
+
+        TextView tgtHdr = new TextView(this);
+        tgtHdr.setText("Entorno objetivo al arrancar:");
+        tgtHdr.setTypeface(Typeface.DEFAULT_BOLD);
+        tgtHdr.setPadding(0, dp(10), 0, dp(4));
+        content.addView(tgtHdr);
+
+        RadioGroup targetGroup = new RadioGroup(this);
+        final RadioButton rbAuto = new RadioButton(this);
+        rbAuto.setText("Automático (según entorno preferido instalado)");
+        rbAuto.setId(View.generateViewId());
+        final RadioButton rbRoot = new RadioButton(this);
+        rbRoot.setText("Camino 1 • Con Root (Chroot)");
+        rbRoot.setId(View.generateViewId());
+        final RadioButton rbProot = new RadioButton(this);
+        rbProot.setText("Camino 2 • Sin Root (PRoot)");
+        rbProot.setId(View.generateViewId());
+        targetGroup.addView(rbAuto);
+        targetGroup.addView(rbRoot);
+        targetGroup.addView(rbProot);
+
+        String curTarget = mSettings.getBootAutostartTarget();
+        if (TerminalSettings.BOOT_TARGET_ROOT.equals(curTarget)) {
+            rbRoot.setChecked(true);
+        } else if (TerminalSettings.BOOT_TARGET_PROOT.equals(curTarget)) {
+            rbProot.setChecked(true);
+        } else {
+            rbAuto.setChecked(true);
+        }
+        content.addView(targetGroup);
+
+        final Switch wakeSwitch = new Switch(this);
+        wakeSwitch.setText("Activar Wake Lock (CPU + WiFi) en autoarranque");
+        wakeSwitch.setPadding(0, dp(8), 0, dp(4));
+        wakeSwitch.setChecked(mSettings.isBootAutostartWakeLock());
+        content.addView(wakeSwitch);
+
+        final Switch keepSwitch = new Switch(this);
+        keepSwitch.setText("Mantener sesión abierta al finalizar (/bin/bash)");
+        keepSwitch.setPadding(0, dp(4), 0, dp(8));
+        keepSwitch.setChecked(mSettings.isBootAutostartKeepSession());
+        content.addView(keepSwitch);
+
+        TextView scriptHdr = new TextView(this);
+        scriptHdr.setText("Script POSIX de arranque (/root/.debianterm/boot/*.sh también se ejecuta):");
+        scriptHdr.setTypeface(Typeface.DEFAULT_BOLD);
+        scriptHdr.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        content.addView(scriptHdr);
+
+        final EditText scriptEt = new EditText(this);
+        scriptEt.setText(mSettings.getBootAutostartScript());
+        scriptEt.setTypeface(Typeface.MONOSPACE);
+        scriptEt.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
+        scriptEt.setTextColor(Color.parseColor("#E6EDF3"));
+        scriptEt.setBackground(makeRoundedBg("#0D1117", "#30363D", 6));
+        scriptEt.setPadding(dp(10), dp(8), dp(10), dp(8));
+        scriptEt.setMinLines(5);
+        scriptEt.setMaxLines(10);
+        scriptEt.setGravity(Gravity.TOP | Gravity.START);
+        scriptEt.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        LinearLayout.LayoutParams etLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        etLp.setMargins(0, dp(6), 0, dp(8));
+        content.addView(scriptEt, etLp);
+
+        TextView hintTv = new TextView(this);
+        String dozeNote = DebianTermService.isIgnoringBatteryOptimizations(this)
+            ? "✓ Batería sin restricciones (listo para segundo plano)."
+            : "⚠ Recomendado desactivar optimización de batería (Doze) para evitar cierres en segundo plano.";
+        hintTv.setText("Logs en: ~/.debianterm/logs/boot-*.log\n" + dozeNote);
+        hintTv.setTextColor(Color.parseColor("#8B949E"));
+        hintTv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
+        content.addView(hintTv);
+
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(content);
+
+        Runnable saveBootPrefs = () -> {
+            mSettings.setBootAutostartEnabled(enableSwitch.isChecked());
+            String chosenTarget = rbRoot.isChecked()
+                ? TerminalSettings.BOOT_TARGET_ROOT
+                : (rbProot.isChecked() ? TerminalSettings.BOOT_TARGET_PROOT : TerminalSettings.BOOT_TARGET_AUTO);
+            mSettings.setBootAutostartTarget(chosenTarget);
+            mSettings.setBootAutostartWakeLock(wakeSwitch.isChecked());
+            mSettings.setBootAutostartKeepSession(keepSwitch.isChecked());
+            mSettings.setBootAutostartScript(scriptEt.getText().toString());
+        };
+
+        AlertDialog dlg = new AlertDialog.Builder(this)
+            .setTitle("🚀 Autoarranque al encender Android")
+            .setView(scroll)
+            .setPositiveButton("Guardar", (d, w) -> {
+                saveBootPrefs.run();
+                Toast.makeText(MainActivity.this,
+                    mSettings.isBootAutostartEnabled()
+                        ? "✓ Autoarranque activado y guardado."
+                        : "✓ Configuración guardada (Autoarranque desactivado).",
+                    Toast.LENGTH_SHORT).show();
+            })
+            .setNeutralButton("▶ Probar ahora", null)
+            .setNegativeButton("Cerrar", null)
+            .create();
+
+        dlg.setOnShowListener(d -> dlg.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(v -> {
+            saveBootPrefs.run();
+            dlg.dismiss();
+            testBootAutostartNow();
+        }));
+        dlg.show();
+    }
+
+    private void testBootAutostartNow() {
+        if (mService == null) {
+            Toast.makeText(this, "Servicio no enlazado aún.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        Toast.makeText(this, "Iniciando prueba de script de autoarranque...", Toast.LENGTH_SHORT).show();
+        final String targetPref = mSettings.getBootAutostartTarget();
+        final String preferredInstallMode = mSettings.getInstallMode();
+        final String chrootPath = mSettings.getChrootPath();
+        final String scriptPath = mSettings.getEntryScriptPath();
+
+        mBgExecutor.execute(() -> {
+            boolean hasRoot = false;
+            boolean rootInstalled = false;
+            if (!TerminalSettings.BOOT_TARGET_PROOT.equals(targetPref)) {
+                ChrootManager.ChrootStatus rootSt = ChrootManager.inspectStatus(chrootPath, scriptPath);
+                hasRoot = rootSt.hasRoot;
+                rootInstalled = rootSt.rootfsExists;
+            }
+            File prootDir = ProotManager.getRootfsDir(MainActivity.this);
+            boolean prootInstalled = prootDir.isDirectory() && new File(prootDir, "bin/bash").exists();
+
+            final Boolean useRoot = BootReceiver.resolveBootMode(
+                targetPref, preferredInstallMode, hasRoot, rootInstalled, prootInstalled);
+            runOnUiThread(() -> {
+                if (useRoot == null) {
+                    Toast.makeText(MainActivity.this,
+                        "No hay entorno Debian 12 listo para el modo seleccionado (" + targetPref + ").",
+                        Toast.LENGTH_LONG).show();
+                    return;
+                }
+                String bootCmd = BootReceiver.buildBootCommand(
+                    mSettings.getBootAutostartScript(), mSettings.isBootAutostartKeepSession());
+                String label = "Autoarranque (" + (useRoot ? "Root" : "Sin Root") + ")";
+                showTerminalView();
+                TerminalSession session = mService.createDebianCommandSession(
+                    useRoot, chrootPath, scriptPath, bootCmd, label, MainActivity.this);
+                switchToSession(session);
+                if (mSettings.isBootAutostartWakeLock() && !mService.isWakeLockHeld()) {
+                    mService.setWakeLockEnabled(true);
+                }
+                refreshDrawerSessions();
+                updateWakeLockUi();
             });
         });
     }
@@ -4698,6 +4954,9 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
 
     @Override
     public void onEmulatorSet() {
+        if (mCurrentSession != null && mCurrentSession.getEmulator() != null) {
+            mCurrentSession.getEmulator().setSixelEnabled(mSettings.isSixelEnabled());
+        }
         if (mTerminalView != null && isTerminalVisible()) {
             mTerminalView.setTerminalCursorBlinkerRate(500);
             mTerminalView.setTerminalCursorBlinkerState(true, true);

@@ -1,6 +1,9 @@
 package com.termux.terminal;
 
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Iterator;
+import java.util.List;
 
 /**
  * A circular buffer of {@link TerminalRow}:s which keeps notes about what is visible on a logical screen and the scroll
@@ -21,6 +24,9 @@ public final class TerminalBuffer {
     private int mScreenFirstRow = 0;
     /** Monotonic document row coordinate corresponding to external row 0 (`mScreenFirstRow`). */
     private long mBaseAbsoluteRow = 0L;
+
+    private static final int MAX_SIXEL_IMAGES = 24;
+    private final ArrayList<SixelImage> mSixelImages = new ArrayList<>();
 
     /**
      * Create a transcript screen.
@@ -159,13 +165,22 @@ public final class TerminalBuffer {
      * or `0` if all screen rows are blank.
      */
     public int getLowestNonEmptyScreenRow() {
+        int lowest = 0;
         for (int extRow = mScreenRows - 1; extRow >= 0; extRow--) {
             TerminalRow line = mLines[externalToInternalRow(extRow)];
             if (line != null && !line.isBlank()) {
-                return extRow;
+                lowest = extRow;
+                break;
             }
         }
-        return 0;
+        for (int i = 0; i < mSixelImages.size(); i++) {
+            SixelImage img = mSixelImages.get(i);
+            long relBottom = (img.anchorAbsoluteRow - mBaseAbsoluteRow) + img.rowSpan - 1;
+            if (relBottom >= 0) {
+                lowest = Math.max(lowest, Math.min(mScreenRows - 1, (int) relBottom));
+            }
+        }
+        return lowest;
     }
 
     /**
@@ -261,6 +276,7 @@ public final class TerminalBuffer {
             cursor[1] -= shiftDownOfTopRow;
             mScreenRows = newRows;
         } else {
+            clearAllSixelImages();
             // Copy away old state and update new:
             TerminalRow[] oldLines = mLines;
             mLines = new TerminalRow[newTotalRows];
@@ -450,6 +466,7 @@ public final class TerminalBuffer {
         mBaseAbsoluteRow++;
         // Note that the history has grown if not already full:
         if (mActiveTranscriptRows < mTotalRows - mScreenRows) mActiveTranscriptRows++;
+        pruneExpiredSixelImages();
 
         // Blank the newly revealed line above the bottom margin:
         int blankRow = externalToInternalRow(bottomMargin - 1);
@@ -547,6 +564,61 @@ public final class TerminalBuffer {
             Arrays.fill(mLines, mScreenFirstRow - mActiveTranscriptRows, mScreenFirstRow, null);
         }
         mActiveTranscriptRows = 0;
+        clearTranscriptSixelImages();
+    }
+
+    public List<SixelImage> getSixelImages() {
+        return mSixelImages;
+    }
+
+    public void addSixelImage(SixelImage img) {
+        if (img == null) return;
+        mSixelImages.add(img);
+        pruneExpiredSixelImages();
+        while (mSixelImages.size() > MAX_SIXEL_IMAGES) {
+            mSixelImages.remove(0);
+        }
+    }
+
+    public void clearSixelImagesInExternalRange(int startExternalRow, int endExternalRowExclusive) {
+        if (mSixelImages.isEmpty() || endExternalRowExclusive <= startExternalRow) return;
+        long startAbs = mBaseAbsoluteRow + startExternalRow;
+        long endAbs = mBaseAbsoluteRow + endExternalRowExclusive;
+        Iterator<SixelImage> it = mSixelImages.iterator();
+        while (it.hasNext()) {
+            SixelImage img = it.next();
+            long imgEnd = img.anchorAbsoluteRow + img.rowSpan;
+            if (img.anchorAbsoluteRow < endAbs && imgEnd > startAbs) {
+                it.remove();
+            }
+        }
+    }
+
+    public void clearTranscriptSixelImages() {
+        if (mSixelImages.isEmpty()) return;
+        Iterator<SixelImage> it = mSixelImages.iterator();
+        while (it.hasNext()) {
+            SixelImage img = it.next();
+            if (img.anchorAbsoluteRow + img.rowSpan <= mBaseAbsoluteRow) {
+                it.remove();
+            }
+        }
+    }
+
+    public void clearAllSixelImages() {
+        mSixelImages.clear();
+    }
+
+    private void pruneExpiredSixelImages() {
+        if (mSixelImages.isEmpty()) return;
+        long oldestKeepRow = mBaseAbsoluteRow - mActiveTranscriptRows;
+        Iterator<SixelImage> it = mSixelImages.iterator();
+        while (it.hasNext()) {
+            SixelImage img = it.next();
+            if (img.anchorAbsoluteRow + img.rowSpan <= oldestKeepRow) {
+                it.remove();
+            }
+        }
     }
 
 }
