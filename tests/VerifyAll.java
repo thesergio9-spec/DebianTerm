@@ -157,7 +157,8 @@ public final class VerifyAll {
         testLargeSyncRedrawAndEraseSettleAntiRewind();
         testScrolledUpPreservedAcrossCsi3jRedrawAndTranscriptCapacity();
         testSafeAppExitOnLastShellExit();
-        System.out.println("ALL 26 VERIFICATION TESTS PASSED.");
+        testRootExecCommandFallback();
+        System.out.println("ALL 27 VERIFICATION TESTS PASSED.");
     }
 
     private static void testDecset2026() {
@@ -444,10 +445,19 @@ public final class VerifyAll {
     }
 
     private static void testProotLauncherScript() throws Exception {
+        Path mockDir = Files.createTempDirectory("test-proot-mock");
+        Path mockProot = mockDir.resolve("libproot.so");
+        Files.write(mockProot, "#!/bin/sh\nprintf 'MOCK_PROOT:%s\\n' \"$*\"\n".getBytes(StandardCharsets.UTF_8));
+        mockProot.toFile().setExecutable(true);
+
+        Path mockFiles = mockDir.resolve("files");
+        Path mockRootfs = mockFiles.resolve("debian12-proot");
+        Files.createDirectories(mockRootfs);
+
         String script = ProotManager.generateProotLauncherScript(
-            "/data/app/x/lib/arm64",
-            "/data/user/0/com.debianchroot.term/files",
-            "/data/user/0/com.debianchroot.term/files/debian12-proot",
+            mockDir.toString(),
+            mockFiles.toString(),
+            mockRootfs.toString(),
             true
         );
         check(script.contains("--link2symlink"), "PRoot script must contain --link2symlink");
@@ -457,6 +467,8 @@ public final class VerifyAll {
         check(script.contains("PROOT_NO_SECCOMP=1"), "PRoot script must export PROOT_NO_SECCOMP=1 when enabled");
         check(script.contains("env -i"), "PRoot script must isolate env with env -i");
         check(!script.contains("TERMUX_"), "PRoot script must not leak TERMUX_ vars");
+        check(script.contains("RUN_MODE=\"$1\""), "PRoot script must capture $1 before set --");
+        check(script.contains("RUN_CMD=\"$2\""), "PRoot script must capture $2 before set --");
 
         Path tmp = Paths.get("/tmp/test-proot-script.sh");
         Files.write(tmp, script.getBytes(StandardCharsets.UTF_8));
@@ -464,10 +476,29 @@ public final class VerifyAll {
             Process p = new ProcessBuilder("sh", "-n", tmp.toString()).start();
             int rc = p.waitFor();
             check(rc == 0, "PRoot sh -n failed with exit code " + rc);
+
+            // Real shell execution test #1: no arguments -> interactive /bin/bash --login
+            Process interactive = new ProcessBuilder("sh", tmp.toString()).start();
+            String interactiveOut = readAllUtf8(interactive.getInputStream());
+            check(interactive.waitFor() == 0, "PRoot mock interactive launch failed");
+            check(interactiveOut.contains("/bin/bash --login"),
+                "Interactive launch must invoke /bin/bash --login, got: " + interactiveOut);
+            check(!interactiveOut.contains("-lc"),
+                "Interactive launch must not invoke -lc, got: " + interactiveOut);
+
+            // Real shell execution test #2: -c "<cmd>" -> must NOT be clobbered by set --
+            Process cmdProc = new ProcessBuilder("sh", tmp.toString(), "-c", "echo DESKTOP_INSTALL_OK").start();
+            String cmdOut = readAllUtf8(cmdProc.getInputStream());
+            check(cmdProc.waitFor() == 0, "PRoot mock -c launch failed");
+            check(cmdOut.contains("/bin/bash -lc echo DESKTOP_INSTALL_OK"),
+                "-c launch must invoke /bin/bash -lc echo DESKTOP_INSTALL_OK, got: " + cmdOut);
+            check(!cmdOut.contains("--login"),
+                "-c launch must not drop into --login, got: " + cmdOut);
         } finally {
             Files.deleteIfExists(tmp);
+            deleteTreeQuietly(mockDir.toFile());
         }
-        System.out.println("[PASS] Test 8: Generated PRoot launcher script syntax (sh -n) and flags");
+        System.out.println("[PASS] Test 8: PRoot launcher script syntax, flags, and real -c arg preservation");
     }
 
     private static void testGracefulCloseApi() throws Exception {
@@ -495,6 +526,9 @@ public final class VerifyAll {
         check(xfceInstall.contains("tigervnc-standalone-server"), "Install cmd must include tigervnc-standalone-server");
         check(xfceInstall.contains("dbus-x11"), "Install cmd must include dbus-x11");
         check(xfceInstall.contains("xfce4"), "XFCE install cmd must include xfce4");
+        check(xfceInstall.contains("xfonts-base"), "Install cmd must include xfonts-base");
+        check(xfceInstall.contains("--force-confdef"), "Install cmd must set dpkg --force-confdef");
+        check(xfceInstall.contains("dbus-uuidgen"), "Install cmd must ensure dbus machine-id");
 
         String lxdeInstall = DesktopManager.generateDesktopInstallCommand(DesktopManager.DESKTOP_LXDE);
         check(lxdeInstall.contains("lxde-core"), "LXDE install cmd must include lxde-core");
@@ -506,18 +540,42 @@ public final class VerifyAll {
         check(vncStart.contains("5901"), "VNC start must use port 5901");
         check(vncStart.contains("trap cleanup_vnc EXIT HUP INT TERM"), "VNC start must trap cleanup");
         check(vncStart.contains("dbus-launch --exit-with-session startxfce4"), "VNC start must launch XFCE4");
+        check(vncStart.contains("XDG_RUNTIME_DIR=/tmp/runtime-root"), "VNC start must set XDG_RUNTIME_DIR=/tmp/runtime-root");
+        check(vncStart.contains("debianterm-vnc.log"), "VNC start must reference /tmp/debianterm-vnc.log");
+        check(vncStart.contains("xsetroot -solid"), "VNC start must set solid desktop background");
+
+        String lxdeVncStart = DesktopManager.generateVncStartCommand(DesktopManager.DESKTOP_LXDE, 1280, 720);
+        check(lxdeVncStart.contains("lxpolkit.desktop"), "LXDE VNC start must mask lxpolkit in container autostart");
+        check(lxdeVncStart.contains("xsetroot -solid"), "LXDE VNC start must set solid desktop background");
 
         String x11Start = DesktopManager.generateTermuxX11StartCommand(DesktopManager.DESKTOP_LXDE);
         check(x11Start.contains("DISPLAY=:0"), "Termux:X11 start must export DISPLAY=:0");
         check(x11Start.contains("startlxde"), "Termux:X11 start must launch startlxde");
+        check(x11Start.contains("XDG_RUNTIME_DIR=/tmp/runtime-root"), "Termux:X11 start must set XDG_RUNTIME_DIR=/tmp/runtime-root");
+        check(x11Start.contains("lxpolkit.desktop"), "LXDE X11 start must mask lxpolkit in container autostart");
+
+        String x11Server = DesktopManager.generateTermuxX11ServerCommand("/data/app/x11/base.apk", "/data/app/x11/lib/arm64", "/tmp/deb-tmp");
+        check(x11Server.contains("debianterm-x11.log"), "Termux:X11 server must log to debianterm-x11.log");
+
+        DesktopManager.DesktopStatus ds = new DesktopManager.DesktopStatus();
+        ds.prootDesktopInstalled = true;
+        ds.prootXfceInstalled = true;
+        ds.prootLxdeInstalled = false;
+        ds.rootDesktopInstalled = true;
+        ds.rootLxdeInstalled = true;
+        ds.rootXfceInstalled = false;
+        check(ds.isDesktopInstalled(false, DesktopManager.DESKTOP_XFCE), "PRoot XFCE must be detected");
+        check(!ds.isDesktopInstalled(false, DesktopManager.DESKTOP_LXDE), "PRoot LXDE must be false when only XFCE is installed");
+        check(ds.isDesktopInstalled(true, DesktopManager.DESKTOP_LXDE), "Root LXDE must be detected");
+        check(!ds.isDesktopInstalled(true, DesktopManager.DESKTOP_XFCE), "Root XFCE must be false when only LXDE is installed");
 
         check(DesktopManager.TERMUX_X11_APK_URL.startsWith("https://github.com/termux/termux-x11/releases/"),
             "Termux:X11 APK URL must point to official releases");
 
-        for (int idx = 0; idx < 2; idx++) {
-            String src = (idx == 0) ? vncStart : x11Start;
+        String[] scripts = { xfceInstall, lxdeInstall, vncStart, lxdeVncStart, x11Start, x11Server };
+        for (int idx = 0; idx < scripts.length; idx++) {
             Path tmp = Paths.get("/tmp/test-desktop-" + idx + ".sh");
-            Files.write(tmp, src.getBytes(StandardCharsets.UTF_8));
+            Files.write(tmp, scripts[idx].getBytes(StandardCharsets.UTF_8));
             try {
                 Process p = new ProcessBuilder("sh", "-n", tmp.toString()).start();
                 check(p.waitFor() == 0, "Desktop script sh -n failed (" + idx + ")");
@@ -525,7 +583,117 @@ public final class VerifyAll {
                 Files.deleteIfExists(tmp);
             }
         }
-        System.out.println("[PASS] Test 10: DesktopManager XFCE4/LXDE VNC & Termux:X11 scripts (sh -n)");
+        System.out.println("[PASS] Test 10: DesktopManager XFCE4/LXDE install, VNC & Termux:X11 scripts (sh -n) & detection");
+    }
+
+    private static void testRootExecCommandFallback() throws Exception {
+        Path tmpDir = Files.createTempDirectory("test-root-exec");
+        try {
+            Path chrootDir = tmpDir.resolve("chroot");
+            Path binDir = chrootDir.resolve("bin");
+            Files.createDirectories(binDir);
+            Path fakeBash = binDir.resolve("bash");
+            Files.write(fakeBash, "#!/bin/sh\nexit 0\n".getBytes(StandardCharsets.UTF_8));
+            fakeBash.toFile().setExecutable(true);
+
+            // Case 1: Entry script supports exec) subcommand -> must be invoked with exact inner cmd
+            Path withExecScript = tmpDir.resolve("debian-with-exec");
+            Files.write(withExecScript,
+                ("#!/bin/sh\n" +
+                 "case \"$1\" in\n" +
+                 "    exec)\n" +
+                 "        shift\n" +
+                 "        printf 'SCRIPT_EXEC:%s\\n' \"$*\"\n" +
+                 "        exit 0\n" +
+                 "        ;;\n" +
+                 "esac\n" +
+                 "echo 'WRONG_INTERACTIVE'\n").getBytes(StandardCharsets.UTF_8));
+            withExecScript.toFile().setExecutable(true);
+
+            String cmdWithExec = ChrootManager.buildRootExecCommand(
+                chrootDir.toString(), withExecScript.toString(), "apt-get update && apt-get install -y lxde-core");
+            Path p1 = tmpDir.resolve("run1.sh");
+            Files.write(p1, cmdWithExec.getBytes(StandardCharsets.UTF_8));
+            Process syn1 = new ProcessBuilder("sh", "-n", p1.toString()).start();
+            check(syn1.waitFor() == 0, "Root exec script sh -n (case 1) failed");
+            Process run1 = new ProcessBuilder("sh", p1.toString()).start();
+            String out1 = readAllUtf8(run1.getInputStream());
+            check(run1.waitFor() == 0, "Root exec case 1 exit failed");
+            check(out1.contains("SCRIPT_EXEC:apt-get update && apt-get install -y lxde-core"),
+                "Entry script with exec) must receive exact command, got: " + out1);
+            check(!out1.contains("WRONG_INTERACTIVE"), "Entry script must not enter interactive branch");
+
+            // Case 2: Pre-existing custom script WITHOUT exec) -> must NOT invoke interactive script
+            Path legacyScript = tmpDir.resolve("debian-no-exec");
+            Files.write(legacyScript,
+                ("#!/bin/sh\n" +
+                 "echo 'CALLED_CUSTOM_INTERACTIVE_SCRIPT'\n").getBytes(StandardCharsets.UTF_8));
+            legacyScript.toFile().setExecutable(true);
+
+            String cmdNoExec = ChrootManager.buildRootExecCommand(
+                chrootDir.toString(), legacyScript.toString(), "echo INNER_CMD");
+            Path p2 = tmpDir.resolve("run2.sh");
+            Files.write(p2, cmdNoExec.getBytes(StandardCharsets.UTF_8));
+            Process syn2 = new ProcessBuilder("sh", "-n", p2.toString()).start();
+            check(syn2.waitFor() == 0, "Root exec script sh -n (case 2) failed");
+            check(cmdNoExec.contains("grep -Eq '^[[:space:]]*exec\\)'"),
+                "Root exec must guard on exec) subcommand support");
+            check(cmdNoExec.contains("_dt_is_mnt"),
+                "Root exec fallback must prepare missing mounts safely");
+
+            // Verify branch decision explicitly in /bin/sh (mock mount + chroot so zero host mounts happen)
+            Path mountLog = tmpDir.resolve("mounts.log");
+            String simulatedFallback = "mount() { printf '%s\\n' \"$*\" >> "
+                + ChrootManager.shellQuote(mountLog.toString()) + "; return 0; }\n"
+                + cmdNoExec.replace("chroot ", "echo FALLBACK_CHROOT ");
+            Path p2Sim = tmpDir.resolve("run2-sim.sh");
+            Files.write(p2Sim, simulatedFallback.getBytes(StandardCharsets.UTF_8));
+            Process run2 = new ProcessBuilder("sh", p2Sim.toString()).redirectErrorStream(true).start();
+            String out2 = readAllUtf8(run2.getInputStream());
+            check(run2.waitFor() == 0, "Root exec case 2 sim exit failed");
+            check(!out2.contains("CALLED_CUSTOM_INTERACTIVE_SCRIPT"),
+                "Custom script without exec) must be skipped, got: " + out2);
+            String mountCalls = Files.exists(mountLog)
+                ? new String(Files.readAllBytes(mountLog), StandardCharsets.UTF_8)
+                : "";
+            check(mountCalls.contains("/dev") && mountCalls.contains("/proc") && mountCalls.contains("/tmp"),
+                "Fallback branch must mount missing /dev, /proc, /tmp pseudo-filesystems, got: " + mountCalls);
+            check(out2.contains("FALLBACK_CHROOT " + chrootDir + " /bin/bash -lc echo INNER_CMD"),
+                "Fallback branch must execute chroot directly, got: " + out2);
+
+            String mountsSnippet = ChrootManager.buildEnsureRootMountsSnippet("/data/local/debian/");
+            Path pMounts = tmpDir.resolve("mounts.sh");
+            Files.write(pMounts, mountsSnippet.getBytes(StandardCharsets.UTF_8));
+            Process synMounts = new ProcessBuilder("sh", "-n", pMounts.toString()).start();
+            check(synMounts.waitFor() == 0, "EnsureRootMounts snippet sh -n failed");
+        } finally {
+            deleteTreeQuietly(tmpDir.toFile());
+        }
+        System.out.println("[PASS] Test 27: Root exec fallback handles custom scripts without exec) & prepares mounts");
+    }
+
+    private static String readAllUtf8(InputStream is) throws Exception {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        byte[] buf = new byte[4096];
+        int n;
+        while ((n = is.read(buf)) != -1) {
+            baos.write(buf, 0, n);
+        }
+        return new String(baos.toByteArray(), StandardCharsets.UTF_8);
+    }
+
+    private static void deleteTreeQuietly(File f) {
+        if (f == null) return;
+        if (!TarExtractor.isSymlink(f) && f.isDirectory()) {
+            File[] children = f.listFiles();
+            if (children != null) {
+                for (File c : children) {
+                    deleteTreeQuietly(c);
+                }
+            }
+        }
+        //noinspection ResultOfMethodCallIgnored
+        f.delete();
     }
 
     private static void testRfbClientProtocol() throws Exception {
@@ -1293,8 +1461,8 @@ public final class VerifyAll {
         }
 
         String manifest = new String(Files.readAllBytes(Paths.get("AndroidManifest.xml")), StandardCharsets.UTF_8);
-        check(manifest.contains("android:versionCode=\"11\"") && manifest.contains("android:versionName=\"2.4.2\""),
-            "AndroidManifest must bump versionCode=11 / versionName=2.4.2");
+        check(manifest.contains("android:versionCode=\"12\"") && manifest.contains("android:versionName=\"2.4.3\""),
+            "AndroidManifest must bump versionCode=12 / versionName=2.4.3");
         check(Files.exists(Paths.get("LICENSE"))
             && new String(Files.readAllBytes(Paths.get("LICENSE")), StandardCharsets.UTF_8)
                 .contains("GNU GENERAL PUBLIC LICENSE"),

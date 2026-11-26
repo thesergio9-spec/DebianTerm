@@ -325,13 +325,66 @@ public final class ChrootManager {
         return status;
     }
 
-    public static String generateEntryScript(String chrootPath) {
+    private static String normalizeChrootPath(String chrootPath) {
         String cleanPath = (chrootPath == null || chrootPath.trim().isEmpty())
             ? TerminalSettings.DEFAULT_CHROOT_PATH
             : chrootPath.trim();
         while (cleanPath.length() > 1 && cleanPath.endsWith("/")) {
             cleanPath = cleanPath.substring(0, cleanPath.length() - 1);
         }
+        return cleanPath;
+    }
+
+    /**
+     * Generates a safe POSIX sh snippet that mounts missing chroot pseudo-filesystems
+     * without touching already-mounted targets or modifying any existing launcher scripts.
+     */
+    public static String buildEnsureRootMountsSnippet(String chrootPath) {
+        String cleanPath = normalizeChrootPath(chrootPath);
+        String qChroot = shellQuote(cleanPath);
+        return "_DT_CHROOT=" + qChroot + "\n" +
+            "_dt_is_mnt() {\n" +
+            "    grep -qs \" $1 \" /proc/mounts && return 0\n" +
+            "    [ -r /proc/1/mountinfo ] && grep -qs \" $1 \" /proc/1/mountinfo && return 0\n" +
+            "    return 1\n" +
+            "}\n" +
+            "mkdir -p \"$_DT_CHROOT/dev\" \"$_DT_CHROOT/dev/pts\" \"$_DT_CHROOT/proc\" \"$_DT_CHROOT/sys\" \"$_DT_CHROOT/tmp\" \"$_DT_CHROOT/dev/shm\" \"$_DT_CHROOT/sdcard\" 2>/dev/null || true\n" +
+            "_dt_is_mnt \"$_DT_CHROOT/dev\" || mount -o bind /dev \"$_DT_CHROOT/dev\" >/dev/null 2>&1 || true\n" +
+            "_dt_is_mnt \"$_DT_CHROOT/dev/pts\" || mount -t devpts -o gid=5,mode=620 devpts \"$_DT_CHROOT/dev/pts\" >/dev/null 2>&1 || true\n" +
+            "_dt_is_mnt \"$_DT_CHROOT/proc\" || mount -t proc proc \"$_DT_CHROOT/proc\" >/dev/null 2>&1 || true\n" +
+            "_dt_is_mnt \"$_DT_CHROOT/sys\" || mount -t sysfs sysfs \"$_DT_CHROOT/sys\" >/dev/null 2>&1 || true\n" +
+            "_dt_is_mnt \"$_DT_CHROOT/tmp\" || mount -t tmpfs -o mode=1777 tmpfs \"$_DT_CHROOT/tmp\" >/dev/null 2>&1 || true\n" +
+            "_dt_is_mnt \"$_DT_CHROOT/dev/shm\" || mount -t tmpfs -o mode=1777 tmpfs \"$_DT_CHROOT/dev/shm\" >/dev/null 2>&1 || true\n" +
+            "if [ -d /storage/emulated/0 ] && ! _dt_is_mnt \"$_DT_CHROOT/sdcard\"; then\n" +
+            "    mount -o bind /storage/emulated/0 \"$_DT_CHROOT/sdcard\" >/dev/null 2>&1 || true\n" +
+            "fi\n";
+    }
+
+    /**
+     * Generates a root shell snippet that runs an inner command inside a Debian chroot.
+     * Uses the entry script only if it explicitly implements the {@code exec)} subcommand;
+     * otherwise falls back to direct chroot with missing mounts prepared first.
+     */
+    public static String buildRootExecCommand(String chrootPath, String scriptPath, String innerDebianCmd) {
+        String cleanPath = normalizeChrootPath(chrootPath);
+        String qChroot = shellQuote(cleanPath);
+        String qScript = shellQuote(scriptPath != null ? scriptPath : "");
+        String qInner = shellQuote(innerDebianCmd != null ? innerDebianCmd : "");
+        return "if [ -x " + qScript + " ] && grep -Eq '^[[:space:]]*exec\\)' " + qScript + " 2>/dev/null; then\n" +
+            "    " + qScript + " exec " + qInner + "\n" +
+            "elif [ -x " + qChroot + "/bin/bash ]; then\n" +
+            buildEnsureRootMountsSnippet(cleanPath) +
+            "    env -i HOME=/root USER=root LOGNAME=root TERM=\"${TERM:-xterm-256color}\" COLORTERM=truecolor LANG=C.UTF-8 TMPDIR=/tmp \\\n" +
+            "        PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \\\n" +
+            "        chroot " + qChroot + " /bin/bash -lc " + qInner + "\n" +
+            "else\n" +
+            "    echo " + shellQuote("Chroot Debian no encontrado en " + cleanPath) + "\n" +
+            "    exit 1\n" +
+            "fi\n";
+    }
+
+    public static String generateEntryScript(String chrootPath) {
+        String cleanPath = normalizeChrootPath(chrootPath);
         String quotedChroot = shellQuote(cleanPath);
         String sessionDir = "/data/local/debian".equals(cleanPath)
             ? "/dev/chroot_sessions"
@@ -454,6 +507,11 @@ public final class ChrootManager {
             "    exec)\n" +
             "        shift\n" +
             "        mount_chroot\n" +
+            "        if [ \"$#\" -eq 1 ]; then\n" +
+            "            _EXEC_CMD=\"$1\"\n" +
+            "        else\n" +
+            "            _EXEC_CMD=\"$*\"\n" +
+            "        fi\n" +
             "        exec env -i \\\n" +
             "            HOME=/root \\\n" +
             "            USER=root \\\n" +
@@ -461,8 +519,9 @@ public final class ChrootManager {
             "            TERM=\"${TERM:-xterm-256color}\" \\\n" +
             "            COLORTERM=truecolor \\\n" +
             "            LANG=C.UTF-8 \\\n" +
+            "            TMPDIR=/tmp \\\n" +
             "            PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \\\n" +
-            "            chroot \"$CHROOT\" /bin/bash -lc \"$*\"\n" +
+            "            chroot \"$CHROOT\" /bin/bash -lc \"$_EXEC_CMD\"\n" +
             "        ;;\n" +
             "esac\n" +
             "\n" +

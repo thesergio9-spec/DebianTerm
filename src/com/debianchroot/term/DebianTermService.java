@@ -382,19 +382,7 @@ public final class DebianTermService extends Service {
         String name = (label != null && !label.isEmpty()) ? label : allocateSessionName("Debian GUI #");
         if (isRootMode) {
             String suBin = ChrootManager.resolveWorkingSuPath();
-            String qScript = ChrootManager.shellQuote(scriptPath);
-            String qChroot = ChrootManager.shellQuote(chrootPath);
-            String qInner = ChrootManager.shellQuote(innerDebianCmd);
-            String rootCmd =
-                "if [ -x " + qScript + " ]; then " +
-                "  " + qScript + " exec " + qInner + "; " +
-                "elif [ -x " + qChroot + "/bin/bash ]; then " +
-                "  env -i HOME=/root USER=root LOGNAME=root TERM=xterm-256color LANG=C.UTF-8 " +
-                "  PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin " +
-                "  chroot " + qChroot + " /bin/bash -lc " + qInner + "; " +
-                "else " +
-                "  echo 'Chroot Debian no encontrado en " + chrootPath + "'; " +
-                "fi";
+            String rootCmd = ChrootManager.buildRootExecCommand(chrootPath, scriptPath, innerDebianCmd);
             String shCmd = "exec " + ChrootManager.shellQuote(suBin) + " -c " + ChrootManager.shellQuote(rootCmd);
             return createRawSession("/system/bin/sh", shCmd, name, kind, client);
         } else {
@@ -449,17 +437,10 @@ public final class DebianTermService extends Service {
 
         if (isRootMode) {
             String suBin = ChrootManager.resolveWorkingSuPath();
-            String qScript = ChrootManager.shellQuote(scriptPath);
-            String qChroot = ChrootManager.shellQuote(chrootPath);
-            String qClient = ChrootManager.shellQuote(x11ClientCmd);
-            String rootCmd = x11ServerCmd + "\n" +
-                "if [ -x " + qScript + " ]; then\n" +
-                "  " + qScript + " exec " + qClient + "\n" +
-                "else\n" +
-                "  env -i HOME=/root USER=root LOGNAME=root TERM=xterm-256color LANG=C.UTF-8 " +
-                "  PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin " +
-                "  chroot " + qChroot + " /bin/bash -lc " + qClient + "\n" +
-                "fi\n";
+            // Prepare chroot mounts first so Termux:X11 creates .X11-unix/X0 inside the mounted tmpfs
+            String rootCmd = ChrootManager.buildEnsureRootMountsSnippet(chrootPath)
+                + x11ServerCmd + "\n"
+                + ChrootManager.buildRootExecCommand(chrootPath, scriptPath, x11ClientCmd);
             String shCmd = "exec " + ChrootManager.shellQuote(suBin) + " -c " + ChrootManager.shellQuote(rootCmd);
             return createRawSession("/system/bin/sh", shCmd, label, SessionKind.DESKTOP_X11, client);
         } else {

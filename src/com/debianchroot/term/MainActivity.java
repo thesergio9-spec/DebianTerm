@@ -1018,8 +1018,14 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         } else {
             mDeskXfceRb.setChecked(true);
         }
-        mDeskXfceRb.setOnClickListener(v -> mSettings.setDesktopEnv(DesktopManager.DESKTOP_XFCE));
-        mDeskLxdeRb.setOnClickListener(v -> mSettings.setDesktopEnv(DesktopManager.DESKTOP_LXDE));
+        mDeskXfceRb.setOnClickListener(v -> {
+            mSettings.setDesktopEnv(DesktopManager.DESKTOP_XFCE);
+            updateDesktopInstallButton();
+        });
+        mDeskLxdeRb.setOnClickListener(v -> {
+            mSettings.setDesktopEnv(DesktopManager.DESKTOP_LXDE);
+            updateDesktopInstallButton();
+        });
         card.addView(deskGroup);
 
         mResGroup = new RadioGroup(this);
@@ -1665,12 +1671,15 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
     }
 
     private void launchGraphicalDebian(final boolean isRootMode) {
-        if (mService == null) return;
+        if (mService == null) {
+            Toast.makeText(this, "Servicio de terminal iniciando, inténtalo de nuevo.", Toast.LENGTH_SHORT).show();
+            return;
+        }
         final String desktopId = mSettings.getDesktopEnv();
         final String backend = mSettings.getGuiBackend();
         DesktopManager.DesktopStatus ds = mLastReport.desktopStatus;
 
-        boolean hasDesktop = isRootMode ? ds.rootDesktopInstalled : ds.prootDesktopInstalled;
+        boolean hasDesktop = ds.isDesktopInstalled(isRootMode, desktopId);
         boolean hasVnc = isRootMode ? ds.rootVncServerInstalled : ds.prootVncServerInstalled;
 
         if (!hasDesktop || (DesktopManager.BACKEND_VNC.equals(backend) && !hasVnc)) {
@@ -1711,7 +1720,10 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
     }
 
     private void startDesktopInstallInTerminal(boolean isRootMode, String desktopId) {
-        if (mService == null) return;
+        if (mService == null) {
+            Toast.makeText(this, "Servicio de terminal iniciando, inténtalo de nuevo.", Toast.LENGTH_SHORT).show();
+            return;
+        }
         showTerminalView();
         TerminalSession session = mService.createDesktopInstallSession(
             isRootMode,
@@ -1755,7 +1767,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         RfbClient client = new RfbClient();
         mRfbClient = client;
         mVncCanvas.attachClient(client);
-        client.connectWithRetry("127.0.0.1", DesktopManager.VNC_PORT, "", 40, 250L, new RfbClient.FrameListener() {
+        client.connectWithRetry("127.0.0.1", DesktopManager.VNC_PORT, "", 60, 250L, new RfbClient.FrameListener() {
             @Override
             public void onConnected(int width, int height, String desktopName) {
                 runOnUiThread(() -> {
@@ -2242,9 +2254,10 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
 
         if (useGui) {
             DesktopManager.DesktopStatus ds = report.desktopStatus;
-            boolean hasGui = chosenIsRoot
-                ? (ds.rootDesktopInstalled && ds.rootVncServerInstalled)
-                : (ds.prootDesktopInstalled && ds.prootVncServerInstalled);
+            boolean hasDesktop = ds.isDesktopInstalled(chosenIsRoot, mSettings.getDesktopEnv());
+            boolean hasVnc = chosenIsRoot ? ds.rootVncServerInstalled : ds.prootVncServerInstalled;
+            boolean hasGui = hasDesktop
+                && (!DesktopManager.BACKEND_VNC.equals(mSettings.getGuiBackend()) || hasVnc);
             if (hasGui) {
                 launchGraphicalDebian(chosenIsRoot);
                 return;
@@ -2339,13 +2352,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
             mGuiDesktopStatusTv.setText("Escritorio -> Con Root: " + rootGui + " | Sin Root: " + prootGui);
         }
 
-        if (mInstallDesktopBtn != null) {
-            boolean anyDebian = (r.hasRoot && r.rootStatus.rootfsExists) || r.prootStatus.rootfsExists;
-            mInstallDesktopBtn.setEnabled(anyDebian);
-            mInstallDesktopBtn.setText(anyDebian
-                ? "⬇ Instalar / Añadir Escritorio (XFCE4 / LXDE)"
-                : "Instala primero Debian 12 en Camino 1 o Camino 2");
-        }
+        updateDesktopInstallButton();
 
         // 4. Path 1 Card: Con Root
         ChrootManager.ChrootStatus rs = r.rootStatus;
@@ -2383,6 +2390,33 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         if (mDashAutoEnterSwitch != null) {
             mDashAutoEnterSwitch.setChecked(mSettings.isAutoEnterTerminal());
         }
+    }
+
+    private void updateDesktopInstallButton() {
+        if (mInstallDesktopBtn == null) return;
+        SystemRequirements.Report r = mLastReport;
+        if (r == null || r.rootStatus == null || r.prootStatus == null || r.desktopStatus == null) {
+            mInstallDesktopBtn.setEnabled(false);
+            mInstallDesktopBtn.setText("Comprobando entornos Debian 12...");
+            return;
+        }
+        boolean canRoot = r.hasRoot && r.rootStatus.rootfsExists;
+        boolean canProot = r.prootBinariesReady && r.prootStatus.rootfsExists;
+        boolean anyDebian = canRoot || canProot;
+        mInstallDesktopBtn.setEnabled(anyDebian);
+        if (!anyDebian) {
+            mInstallDesktopBtn.setText("Instala primero Debian 12 en Camino 1 o Camino 2");
+            return;
+        }
+        String deskId = mSettings.getDesktopEnv();
+        String deskName = DesktopManager.DESKTOP_LXDE.equals(deskId) ? "LXDE" : "XFCE4";
+        DesktopManager.DesktopStatus ds = r.desktopStatus;
+        boolean allReadyHaveDesk =
+            (!canRoot || (ds.isDesktopInstalled(true, deskId) && ds.rootVncServerInstalled))
+            && (!canProot || (ds.isDesktopInstalled(false, deskId) && ds.prootVncServerInstalled));
+        mInstallDesktopBtn.setText(allReadyHaveDesk
+            ? ("↻ Reinstalar / Reparar " + deskName + " + VNC")
+            : ("⬇ Instalar " + deskName + " + VNC"));
     }
 
     private void updatePathButtonsForMode() {
