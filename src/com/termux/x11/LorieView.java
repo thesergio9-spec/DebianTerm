@@ -103,6 +103,14 @@ public class LorieView extends FrameLayout implements ClipboardManager.OnPrimary
     private boolean mFitToSurface = false;
     private int mLastSurfaceWidth = 0;
     private int mLastSurfaceHeight = 0;
+    private int mSurfaceWidth = 0;
+    private int mSurfaceHeight = 0;
+    private String mPreferredOrientation = "auto";
+    private int mLastXScreenW = 0;
+    private int mLastXScreenH = 0;
+    private int mLastSentXWidth = 0;
+    private int mLastSentXHeight = 0;
+    private int mLastSentRefresh = 0;
     private final Point mXScreenSize = new Point(1280, 720);
     private final Rect mViewport = new Rect();
     private final Rect mInputViewport = new Rect();
@@ -139,6 +147,16 @@ public class LorieView extends FrameLayout implements ClipboardManager.OnPrimary
         }
     };
 
+    private final Runnable mSurfaceFollowUpRunnable = () -> updateViewport();
+
+    private final Runnable mPostResizeSyncRunnable = () -> {
+        if (mNativeContext != 0 && connected() && mViewport.width() > 0 && mViewport.height() > 0) {
+            setViewport(mNativeContext, mViewport.left, mViewport.top, mViewport.width(), mViewport.height(),
+                mXScreenSize.x, mXScreenSize.y, 0);
+            sendMouseEvent(0f, 0f, BUTTON_UNDEFINED, false, true);
+        }
+    };
+
     private final Runnable mLongPressRunnable = () -> {
         if (!mMovedBeyondSlop && !mMultiTouchSeen && mTouchpadMode && connected()) {
             mLongPressFired = true;
@@ -152,12 +170,18 @@ public class LorieView extends FrameLayout implements ClipboardManager.OnPrimary
 
         @Override
         public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
+            mSurfaceWidth = width;
+            mSurfaceHeight = height;
             activity.windowChanged(holder.getSurface());
             updateViewport();
+            mUiHandler.removeCallbacks(mSurfaceFollowUpRunnable);
+            mUiHandler.postDelayed(mSurfaceFollowUpRunnable, 150L);
         }
 
         @Override
         public void surfaceDestroyed(SurfaceHolder holder) {
+            mSurfaceWidth = 0;
+            mSurfaceHeight = 0;
             activity.windowChanged(null);
         }
     };
@@ -256,6 +280,11 @@ public class LorieView extends FrameLayout implements ClipboardManager.OnPrimary
     private static final class HoleSurfaceView extends SurfaceView {
         private final Rect mHole = new Rect();
         private final int[] mLocation = new int[2];
+        private boolean mFill = false;
+
+        void setFillAll(boolean fill) {
+            mFill = fill;
+        }
 
         HoleSurfaceView(Context context) {
             super(context);
@@ -268,6 +297,11 @@ public class LorieView extends FrameLayout implements ClipboardManager.OnPrimary
         }
 
         private void punchHole(Canvas canvas) {
+            if (mFill) {
+                if (getWidth() <= 0 || getHeight() <= 0) return;
+                canvas.drawColor(0, PorterDuff.Mode.CLEAR);
+                return;
+            }
             if (mHole.isEmpty()) return;
             canvas.save();
             canvas.clipRect(mHole);
@@ -287,7 +321,16 @@ public class LorieView extends FrameLayout implements ClipboardManager.OnPrimary
 
         @Override
         public boolean gatherTransparentRegion(Region region) {
-            if (region != null && !mHole.isEmpty()) {
+            if (region != null && mFill && getWidth() > 0 && getHeight() > 0) {
+                getLocationInWindow(mLocation);
+                region.op(
+                    mLocation[0],
+                    mLocation[1],
+                    mLocation[0] + getWidth(),
+                    mLocation[1] + getHeight(),
+                    Region.Op.UNION
+                );
+            } else if (region != null && !mHole.isEmpty()) {
                 getLocationInWindow(mLocation);
                 region.op(
                     mLocation[0] + mHole.left,
@@ -310,6 +353,7 @@ public class LorieView extends FrameLayout implements ClipboardManager.OnPrimary
         mTouchSlopPx = ViewConfiguration.get(context).getScaledTouchSlop();
 
         mPictureView = new HoleSurfaceView(context);
+        mPictureView.setFillAll(true);
         mCursorView = new HoleSurfaceView(context);
         mPictureView.getHolder().addCallback(mSurfaceCallback);
         mCursorView.getHolder().addCallback(mCursorSurfaceCallback);
@@ -376,6 +420,12 @@ public class LorieView extends FrameLayout implements ClipboardManager.OnPrimary
         if (mRendererZoom > 100f) {
             resetRendererZoom();
         }
+        updateViewport();
+    }
+
+    public void setPreferredOrientation(String orientation) {
+        mPreferredOrientation = ("portrait".equals(orientation) || "landscape".equals(orientation))
+            ? orientation : "auto";
         updateViewport();
     }
 
@@ -455,6 +505,8 @@ public class LorieView extends FrameLayout implements ClipboardManager.OnPrimary
 
     private void mHandlerRemoveAll() {
         mUiHandler.removeCallbacks(mLongPressRunnable);
+        mUiHandler.removeCallbacks(mPostResizeSyncRunnable);
+        mUiHandler.removeCallbacks(mSurfaceFollowUpRunnable);
     }
 
     /** Hands the current Picture & Cursor Surfaces to the active X server. */
@@ -499,33 +551,43 @@ public class LorieView extends FrameLayout implements ClipboardManager.OnPrimary
     }
 
     private void updateViewport() {
-        int surfaceW = getWidth() > 0 ? getWidth() : getMeasuredWidth();
-        int surfaceH = getHeight() > 0 ? getHeight() : getMeasuredHeight();
+        int surfaceW = mSurfaceWidth > 0 ? mSurfaceWidth : getWidth();
+        int surfaceH = mSurfaceHeight > 0 ? mSurfaceHeight : getHeight();
         if (surfaceW <= 0 || surfaceH <= 0) return;
 
-        if (surfaceW != mLastSurfaceWidth || surfaceH != mLastSurfaceHeight) {
-            mLastSurfaceWidth = surfaceW;
-            mLastSurfaceHeight = surfaceH;
-            if (mRendererZoom > 100f) {
-                mRendererZoom = 100f;
-                if (mNativeContext != 0) {
-                    setRendererZoom(mNativeContext, 100);
-                }
-            }
+        boolean portrait;
+        if (mFitToSurface) {
+            portrait = surfaceW < surfaceH;
+        } else if ("portrait".equals(mPreferredOrientation)) {
+            portrait = true;
+        } else if ("landscape".equals(mPreferredOrientation)) {
+            portrait = false;
+        } else {
+            portrait = surfaceW < surfaceH;
         }
 
         if (mFitToSurface) {
-            int[] fit = com.debianchroot.term.DesktopManager.computeFitResolution(
-                surfaceW, surfaceH, surfaceW < surfaceH);
+            int[] fit = com.debianchroot.term.DesktopManager.computeFitResolution(surfaceW, surfaceH, portrait);
             applyCvtDimensions(fit[0], fit[1]);
         } else {
-            // Automatically orient target aspect to match landscape/portrait screen cleanly.
-            int desiredW = mTargetWidth;
-            int desiredH = mTargetHeight;
-            if ((surfaceW < surfaceH && desiredW > desiredH) || (surfaceW > surfaceH && desiredW < desiredH)) {
-                applyCvtDimensions(desiredH, desiredW);
+            int big = Math.max(mTargetWidth, mTargetHeight);
+            int small = Math.min(mTargetWidth, mTargetHeight);
+            if (portrait) {
+                applyCvtDimensions(small, big);
             } else {
-                applyCvtDimensions(desiredW, desiredH);
+                applyCvtDimensions(big, small);
+            }
+        }
+
+        if (surfaceW != mLastSurfaceWidth || surfaceH != mLastSurfaceHeight
+            || mXScreenSize.x != mLastXScreenW || mXScreenSize.y != mLastXScreenH) {
+            mLastSurfaceWidth = surfaceW;
+            mLastSurfaceHeight = surfaceH;
+            mLastXScreenW = mXScreenSize.x;
+            mLastXScreenH = mXScreenSize.y;
+            mRendererZoom = 100f;
+            if (mNativeContext != 0) {
+                setRendererZoom(mNativeContext, 100);
             }
         }
 
@@ -555,18 +617,29 @@ public class LorieView extends FrameLayout implements ClipboardManager.OnPrimary
         if (mNativeContext != 0) {
             setViewport(mNativeContext, mViewport.left, mViewport.top, mViewport.width(), mViewport.height(),
                 mXScreenSize.x, mXScreenSize.y, 0);
+            if (!connected()) {
+                mLastSentXWidth = 0;
+                mLastSentXHeight = 0;
+                mLastSentRefresh = 0;
+            }
             Display disp = getDisplay();
             int refresh = (int) Math.max(30f, disp != null ? disp.getRefreshRate() : 60f);
-            sendWindowChange(mNativeContext, mXScreenSize.x, mXScreenSize.y, refresh, "builtin");
+            if (mXScreenSize.x != mLastSentXWidth || mXScreenSize.y != mLastSentXHeight
+                || refresh != mLastSentRefresh) {
+                mLastSentXWidth = mXScreenSize.x;
+                mLastSentXHeight = mXScreenSize.y;
+                mLastSentRefresh = refresh;
+                sendWindowChange(mNativeContext, mXScreenSize.x, mXScreenSize.y, refresh, "builtin");
+                mUiHandler.removeCallbacks(mPostResizeSyncRunnable);
+                mUiHandler.postDelayed(mPostResizeSyncRunnable, 180L);
+            }
         }
     }
 
     @Override
     protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
         super.onMeasure(widthMeasureSpec, heightMeasureSpec);
-        updateViewport();
     }
-
     @Override
     protected void onSizeChanged(int w, int h, int oldw, int oldh) {
         super.onSizeChanged(w, h, oldw, oldh);
@@ -822,6 +895,13 @@ public class LorieView extends FrameLayout implements ClipboardManager.OnPrimary
         final float sourceWidth, final float sourceHeight
     ) {
         mUiHandler.post(() -> {
+            if (viewportWidth <= 0 || viewportHeight <= 0 || sourceWidth <= 0f || sourceHeight <= 0f) {
+                return;
+            }
+            if (mRendererZoom <= 100f
+                && (Math.abs(sourceWidth - mXScreenSize.x) > 8f || Math.abs(sourceHeight - mXScreenSize.y) > 8f)) {
+                return;
+            }
             mInputViewport.set(viewportLeft, viewportTop,
                 viewportLeft + viewportWidth, viewportTop + viewportHeight);
             mInputSourceLeft = sourceLeft;
@@ -859,6 +939,9 @@ public class LorieView extends FrameLayout implements ClipboardManager.OnPrimary
     // -------------------------------------------------------------------------
 
     public void connect(int fd) {
+        mLastSentXWidth = 0;
+        mLastSentXHeight = 0;
+        mLastSentRefresh = 0;
         if (mNativeContext != 0) {
             connect(mNativeContext, fd);
         }

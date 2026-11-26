@@ -170,6 +170,96 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
     };
     private TerminalSession mActiveDesktopSession;
 
+    private final Runnable mVncResizeRunnable = new Runnable() {
+        @Override
+        public void run() {
+            applyVncDynamicResize();
+        }
+    };
+
+    private void scheduleVncResize(long delayMs) {
+        mX11Handler.removeCallbacks(mVncResizeRunnable);
+        mX11Handler.postDelayed(mVncResizeRunnable, Math.max(0L, delayMs));
+    }
+
+    /** Resizes Xtigervnc live so its geometry always matches the (possibly rotated) canvas. */
+    private void applyVncDynamicResize() {
+        if (mActiveDesktopIsX11 || mRfbClient == null || mVncCanvas == null || mSettings == null) return;
+        int cw = mVncCanvas.getWidth();
+        int ch = mVncCanvas.getHeight();
+        int[] target;
+        if (cw > 0 && ch > 0) {
+            String orient = cw < ch
+                ? TerminalSettings.GUI_ORIENTATION_PORTRAIT
+                : TerminalSettings.GUI_ORIENTATION_LANDSCAPE;
+            target = DesktopManager.resolveDesktopResolution(mSettings.getGuiResolution(), orient, cw, ch);
+        } else {
+            target = resolveConfiguredDesktopSize();
+        }
+        mRfbClient.requestDesktopResize(target[0], target[1]);
+    }
+
+    /** Applies the persisted resolution/orientation settings to the active X11/VNC desktop. */
+    private void syncActiveDesktopDisplayConfig() {
+        if (mSettings == null) return;
+        if (mActiveDesktopIsX11) {
+            if (mLorieView == null) return;
+            mLorieView.setPreferredOrientation(mSettings.getGuiOrientation());
+            if (TerminalSettings.GUI_RESOLUTION_FIT.equals(mSettings.getGuiResolution())) {
+                mLorieView.setFitToScreen(true);
+            } else {
+                int[] res = resolveConfiguredDesktopSize();
+                mLorieView.setTargetResolution(res[0], res[1]);
+            }
+            mLorieView.triggerCallback();
+        } else if (mRfbClient != null) {
+            scheduleVncResize(120L);
+        }
+    }
+
+    private void syncRunningDesktopFromSettings() {
+        if (mActiveDesktopSession != null && mActiveDesktopSession.isRunning()) {
+            syncActiveDesktopDisplayConfig();
+        }
+    }
+
+    /** Re-attaches the UI to an already running desktop session after the Activity was recreated. */
+    private boolean adoptRunningDesktopSession(List<TerminalSession> sessions, TerminalSession target) {
+        if (mService == null || target == null) return false;
+        DebianTermService.SessionKind kind = mService.getSessionKind(target);
+        if (!target.isRunning()
+            || (kind != DebianTermService.SessionKind.DESKTOP_X11
+                && kind != DebianTermService.SessionKind.DESKTOP_VNC)) {
+            return false;
+        }
+        mActiveDesktopSession = target;
+        mActiveDesktopIsX11 = (kind == DebianTermService.SessionKind.DESKTOP_X11);
+        if (mActiveDesktopIsX11) {
+            if (mVncCanvas != null) mVncCanvas.setVisibility(View.GONE);
+            if (mLorieView != null) {
+                mLorieView.setVisibility(View.VISIBLE);
+                mLorieView.setTouchpadMode(true);
+            }
+        } else {
+            if (mLorieView != null) mLorieView.setVisibility(View.GONE);
+            if (mVncCanvas != null) {
+                mVncCanvas.setVisibility(View.VISIBLE);
+                mVncCanvas.setTouchpadMode(true);
+            }
+        }
+        updateTouchToggleButton(true);
+        switchToSession(target);
+        showDesktopView();
+        mDesktopOverlay.setVisibility(View.VISIBLE);
+        mDesktopOverlayText.setText("Reconectando con el escritorio activo...");
+        if (mActiveDesktopIsX11) {
+            scheduleX11Connect(0);
+        } else {
+            connectVncClient();
+        }
+        return true;
+    }
+
     // Dashboard controls
     private LinearLayout mDashResumeContainer;
     private Button mDashResumeBtn;
@@ -263,8 +353,10 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
                         target = sessions.get(sessions.size() - 1);
                     }
                 }
-                showTerminalView();
-                switchToSession(target);
+                if (!adoptRunningDesktopSession(sessions, target)) {
+                    showTerminalView();
+                    switchToSession(target);
+                }
                 runRequirementsCheckAsync(false);
             } else {
                 mCurrentSession = null;
@@ -363,13 +455,14 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
             if (mActiveDesktopIsX11 && mLorieView != null) {
                 mLorieView.post(() -> {
                     if (mLorieView != null && isDesktopVisible()) {
-                        mLorieView.triggerCallback();
+                        syncActiveDesktopDisplayConfig();
                     }
                 });
             } else if (mVncCanvas != null) {
                 mVncCanvas.post(() -> {
                     if (mVncCanvas != null) {
                         mVncCanvas.resetZoom();
+                        scheduleVncResize(150L);
                     }
                 });
             }
@@ -516,13 +609,16 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         } else if (TerminalSettings.GUI_ORIENTATION_LANDSCAPE.equals(orient)) {
             setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
         } else {
-            setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
+            setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR);
         }
         updateDesktopOrientButton();
     }
 
     private void restoreDefaultOrientation() {
         setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
+        getWindow().setSoftInputMode(
+            android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+                | android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);
     }
 
     private void showDashboardView(boolean triggerCheck) {
@@ -568,7 +664,11 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         }
         if (mTerminalView != null) mTerminalView.setTerminalCursorBlinkerState(false, true);
         if (mDesktopView != null) mDesktopView.setVisibility(View.VISIBLE);
+        getWindow().setSoftInputMode(
+            android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_PAN
+                | android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);
         applyDesktopOrientationPreference();
+        syncActiveDesktopDisplayConfig();
         if (mActiveDesktopIsX11 && mLorieView != null) {
             mLorieView.requestFocus();
             mLorieView.sendSurface();
@@ -627,6 +727,11 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
 
         FrameLayout canvasWrap = new FrameLayout(this);
         mVncCanvas = new VncCanvasView(this);
+        mVncCanvas.setSizeChangeListener((w, h) -> {
+            if (!mActiveDesktopIsX11 && mRfbClient != null) {
+                scheduleVncResize(100L);
+            }
+        });
         canvasWrap.addView(mVncCanvas, new FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
@@ -779,6 +884,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         mSettings.setGuiOrientation(next);
         applyDesktopOrientationPreference();
         syncGuiOrientationRadios();
+        syncActiveDesktopDisplayConfig();
 
         String label;
         if (TerminalSettings.GUI_ORIENTATION_PORTRAIT.equals(next)) {
@@ -788,9 +894,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         } else {
             label = "Orientación Automática (sensor)";
         }
-        if (!mActiveDesktopIsX11) {
-            label += " (en VNC reinicia el escritorio para aplicar geometría)";
-        }
+
         Toast.makeText(this, label, Toast.LENGTH_SHORT).show();
     }
 
@@ -1246,7 +1350,10 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
             if (resOpt.equals(curRes)) {
                 rb.setChecked(true);
             }
-            rb.setOnClickListener(v -> mSettings.setGuiResolution(resOpt));
+            rb.setOnClickListener(v -> {
+                mSettings.setGuiResolution(resOpt);
+                syncRunningDesktopFromSettings();
+            });
         }
         resScroll.addView(mResGroup, new FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
@@ -1290,14 +1397,17 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         mOrientAutoRb.setOnClickListener(v -> {
             mSettings.setGuiOrientation(TerminalSettings.GUI_ORIENTATION_AUTO);
             updateDesktopOrientButton();
+            syncRunningDesktopFromSettings();
         });
         mOrientPortraitRb.setOnClickListener(v -> {
             mSettings.setGuiOrientation(TerminalSettings.GUI_ORIENTATION_PORTRAIT);
             updateDesktopOrientButton();
+            syncRunningDesktopFromSettings();
         });
         mOrientLandscapeRb.setOnClickListener(v -> {
             mSettings.setGuiOrientation(TerminalSettings.GUI_ORIENTATION_LANDSCAPE);
             updateDesktopOrientButton();
+            syncRunningDesktopFromSettings();
         });
         card.addView(mOrientGroup);
 
@@ -2024,7 +2134,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         mSettings.setInstallMode(isRootMode ? TerminalSettings.MODE_ROOT : TerminalSettings.MODE_PROOT);
         disconnectDesktopBackends();
         if (mActiveDesktopSession != null && mService.hasSession(mActiveDesktopSession)) {
-            mService.removeSession(mActiveDesktopSession);
+            mService.removeSessionKeepDesktopProcesses(mActiveDesktopSession);
         }
         mActiveDesktopIsX11 = false;
         if (mLorieView != null) mLorieView.setVisibility(View.GONE);
@@ -2056,6 +2166,13 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
             + (DesktopManager.DESKTOP_LXDE.equals(mSettings.getDesktopEnv()) ? "LXDE" : "XFCE4")
             + " (" + res[0] + "×" + res[1] + ") en VNC :1...");
 
+        connectVncClient();
+        refreshDrawerSessions();
+        updateDashboardResumeBar();
+        updateWakeLockUi();
+    }
+
+    private void connectVncClient() {
         RfbClient client = new RfbClient();
         mRfbClient = client;
         mVncCanvas.attachClient(client);
@@ -2065,6 +2182,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
                 runOnUiThread(() -> {
                     mVncCanvas.initFramebuffer(width, height);
                     mDesktopOverlay.setVisibility(View.GONE);
+                    scheduleVncResize(250L);
                 });
             }
 
@@ -2128,7 +2246,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
 
         disconnectDesktopBackends();
         if (mActiveDesktopSession != null && mService.hasSession(mActiveDesktopSession)) {
-            mService.removeSession(mActiveDesktopSession);
+            mService.removeSessionKeepDesktopProcesses(mActiveDesktopSession);
         }
 
         int[] res = resolveConfiguredDesktopSize();
@@ -2296,6 +2414,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
     }
 
     private void disconnectRfbClient() {
+        mX11Handler.removeCallbacks(mVncResizeRunnable);
         RfbClient c = mRfbClient;
         mRfbClient = null;
         if (mVncCanvas != null) {
@@ -2335,12 +2454,20 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
     }
 
     private void toggleWakeLockFromUi() {
-        if (mService == null) return;
-        if (mService.getSessions().isEmpty()) {
-            Toast.makeText(this, "Abre una sesión primero para activar Wake Lock.", Toast.LENGTH_SHORT).show();
+        if (mService == null || mService.getSessions().isEmpty()) {
+            boolean willEnable = !mSettings.isAutoWakeLockEnabled();
+            mSettings.setAutoWakeLockEnabled(willEnable);
+            updateWakeLockUi();
+            if (willEnable) {
+                requestNotificationsPermissionIfNeeded(false);
+                Toast.makeText(this, "Wake Lock activado (se aplicará al abrir sesión).", Toast.LENGTH_SHORT).show();
+            } else {
+                Toast.makeText(this, "Wake Lock desactivado.", Toast.LENGTH_SHORT).show();
+            }
             return;
         }
         boolean willEnable = !mService.isWakeLockHeld();
+        mSettings.setAutoWakeLockEnabled(willEnable);
         mService.setWakeLockEnabled(willEnable);
         updateWakeLockUi();
         if (willEnable) {
@@ -2359,10 +2486,18 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         if (mDrawerWakeLockBtn != null) {
             boolean held = mService != null && mService.isWakeLockHeld();
             boolean wifi = mService != null && mService.isWifiLockHeld();
-            mDrawerWakeLockBtn.setText(held
-                ? (wifi ? "⚡ Wake: CPU+WiFi" : "⚡ Wake: CPU")
-                : "⚡ Wake: OFF");
-            mDrawerWakeLockBtn.setBackground(makePillBg(held ? "#9E6A03" : "#21262D"));
+            boolean persisted = mSettings != null && mSettings.isAutoWakeLockEnabled()
+                && (mService == null || mService.getSessions().isEmpty());
+            if (held) {
+                mDrawerWakeLockBtn.setText(wifi ? "⚡ Wake: CPU+WiFi" : "⚡ Wake: CPU");
+                mDrawerWakeLockBtn.setBackground(makePillBg("#9E6A03"));
+            } else if (persisted) {
+                mDrawerWakeLockBtn.setText("⚡ Wake: ON");
+                mDrawerWakeLockBtn.setBackground(makePillBg("#9E6A03"));
+            } else {
+                mDrawerWakeLockBtn.setText("⚡ Wake: OFF");
+                mDrawerWakeLockBtn.setBackground(makePillBg("#21262D"));
+            }
         }
     }
 

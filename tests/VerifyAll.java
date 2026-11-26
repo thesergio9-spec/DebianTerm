@@ -163,7 +163,8 @@ public final class VerifyAll {
         testRootExecCommandFallback();
         testBuiltInNativeX11JniContract();
         testDesktopOrientationAndResolution();
-        System.out.println("ALL 29 VERIFICATION TESTS PASSED.");
+        testDesktopCleanupAndLiveVncResize();
+        System.out.println("ALL 30 VERIFICATION TESTS PASSED.");
     }
 
     private static void testDecset2026() {
@@ -1471,8 +1472,11 @@ public final class VerifyAll {
         }
 
         String manifest = new String(Files.readAllBytes(Paths.get("AndroidManifest.xml")), StandardCharsets.UTF_8);
-        check(manifest.contains("android:versionCode=\"13\"") && manifest.contains("android:versionName=\"2.5.0\""),
-            "AndroidManifest must bump versionCode=13 / versionName=2.5.0");
+        check(manifest.contains("android:versionCode=\"14\"") && manifest.contains("android:versionName=\"2.5.1\""),
+            "AndroidManifest must bump versionCode=14 / versionName=2.5.1");
+        check(manifest.contains("|density|") && manifest.contains("fontScale")
+                && manifest.contains("layoutDirection") && manifest.contains("screenSize"),
+            "MainActivity configChanges must cover density/fontScale/layoutDirection/screenSize");
         check(Files.exists(Paths.get("LICENSE"))
             && new String(Files.readAllBytes(Paths.get("LICENSE")), StandardCharsets.UTF_8)
                 .contains("GNU GENERAL PUBLIC LICENSE"),
@@ -1904,6 +1908,262 @@ public final class VerifyAll {
         check(Modifier.isPublic(setFit.getModifiers()), "LorieView.setFitToScreen(boolean) must be public");
 
         System.out.println("[PASS] Test 29: Desktop orientation & full-screen fit resolution (X11 & VNC)");
+    }
+
+    private static void shSyntaxCheck(String name, String script) throws Exception {
+        Path tmp = Paths.get("/tmp/test-" + name + ".sh");
+        Files.write(tmp, script.getBytes(StandardCharsets.UTF_8));
+        try {
+            Process p = new ProcessBuilder("sh", "-n", tmp.toString()).start();
+            check(p.waitFor() == 0, "sh -n failed for " + name);
+        } finally {
+            Files.deleteIfExists(tmp);
+        }
+    }
+
+    private static Process spawnDummy(String shellCmd, String display) throws Exception {
+        ProcessBuilder pb = new ProcessBuilder("bash", "-c", shellCmd);
+        if (display != null) {
+            pb.environment().put("DISPLAY", display);
+        }
+        pb.redirectErrorStream(true);
+        Process p = pb.start();
+        Thread.sleep(300L);
+        return p;
+    }
+
+    private static boolean waitDead(Process p, long ms) throws Exception {
+        long deadline = System.currentTimeMillis() + ms;
+        while (System.currentTimeMillis() < deadline) {
+            if (!p.isAlive()) return true;
+            Thread.sleep(50L);
+        }
+        return !p.isAlive();
+    }
+
+    private static void runSnippet(String snippet) throws Exception {
+        Process p = new ProcessBuilder("sh", "-c", snippet).redirectErrorStream(true).start();
+        p.getOutputStream().close();
+        byte[] drain = new byte[4096];
+        while (p.getInputStream().read(drain) != -1) {
+            // drain
+        }
+        check(p.waitFor() == 0, "cleanup snippet must exit 0");
+    }
+
+    private static void writeExtendedDesktopSize(DataOutputStream dos, int reason, int status, int w, int h, int id)
+        throws Exception {
+        dos.writeByte(0);
+        dos.writeByte(0);
+        dos.writeShort(1);
+        dos.writeShort(reason);
+        dos.writeShort(status);
+        dos.writeShort(w);
+        dos.writeShort(h);
+        dos.writeInt(RfbClient.ENCODING_EXTENDED_DESKTOP_SIZE);
+        dos.writeByte(1);
+        dos.write(new byte[3]);
+        dos.writeInt(id);
+        dos.writeShort(0);
+        dos.writeShort(0);
+        dos.writeShort(w);
+        dos.writeShort(h);
+        dos.writeInt(0);
+        dos.flush();
+    }
+
+    private static void testDesktopCleanupAndLiveVncResize() throws Exception {
+        // 1) Generated cleanup snippets and desktop scripts must be valid POSIX sh
+        String snipSrv0 = DesktopManager.buildCleanupDisplayProcessesSnippet(":0", true);
+        String snipCli0 = DesktopManager.buildCleanupDisplayProcessesSnippet(":0", false);
+        String snipSrv1 = DesktopManager.buildCleanupDisplayProcessesSnippet(":1", true);
+        shSyntaxCheck("cleanup-srv0", snipSrv0);
+        shSyntaxCheck("cleanup-cli0", snipCli0);
+        shSyntaxCheck("cleanup-srv1", snipSrv1);
+        check(snipSrv0.contains("CmdEntryPoint") && snipSrv0.contains("_dt_kill_display ':0' 1"),
+            "X11 server cleanup must target CmdEntryPoint on :0");
+        check(snipSrv1.contains("Xtigervnc") && snipSrv1.contains("_dt_kill_display ':1' 1"),
+            "VNC server cleanup must target Xtigervnc on :1");
+        check(snipCli0.contains("_dt_kill_display ':0' 0"), "Client cleanup must disable server kill");
+
+        String x11Server = DesktopManager.generateBuiltInX11ServerCommand(
+            "/data/app/x/base.apk", "/data/app/x/lib/arm64", "/data/local/debian/tmp", "/data/local/debian");
+        int killIdx = x11Server.indexOf("_dt_kill_display ':0' 1");
+        int rmIdx = x11Server.indexOf("rm -f \"$TMP_HOST/.X0-lock\"");
+        check(killIdx >= 0 && rmIdx > killIdx,
+            "X11 server must sweep orphaned :0 processes BEFORE removing .X0-lock/socket");
+        shSyntaxCheck("x11-server", x11Server);
+
+        String x11Client = DesktopManager.generateTermuxX11StartCommand(DesktopManager.DESKTOP_LXDE);
+        check(x11Client.contains("_dt_kill_display ':0' 0") && !x11Client.contains("_dt_kill_display ':0' 1"),
+            "X11 client script must only sweep clients, never the just-started :0 server");
+        check(x11Client.contains("polkit/command=") && x11Client.contains("xset s off"),
+            "LXDE session prep must neutralize lxpolkit and disable screen blanking");
+        shSyntaxCheck("x11-client-lxde", x11Client);
+        shSyntaxCheck("x11-client-xfce", DesktopManager.generateTermuxX11StartCommand(DesktopManager.DESKTOP_XFCE));
+
+        String vnc = DesktopManager.generateVncStartCommand(DesktopManager.DESKTOP_LXDE, 720, 1280);
+        int vKill = vnc.indexOf("_dt_kill_display ':1' 1");
+        int vRm = vnc.indexOf("rm -f /tmp/.X1-lock");
+        check(vKill >= 0 && vRm > vKill, "VNC must sweep orphaned :1 processes BEFORE removing .X1-lock");
+        check(vnc.contains("xset s off") && vnc.contains("polkit/command="),
+            "VNC LXDE prep must disable blanking and lxpolkit");
+        shSyntaxCheck("vnc-lxde", vnc);
+
+        // 2) Execute the sweeper against harmless dummies on a private display (:7), never :0/:1
+        String snipSrv7 = DesktopManager.buildCleanupDisplayProcessesSnippet(":7", true);
+        String snipCli7 = DesktopManager.buildCleanupDisplayProcessesSnippet(":7", false);
+        Process server7 = spawnDummy("exec -a 'Xtigervnc :7' sleep 300", null);
+        Process client7 = spawnDummy("exec -a xfce4-session sleep 301", ":7");
+        Process other8 = spawnDummy("exec -a xfce4-session sleep 302", ":8");
+        Process bystander = spawnDummy("exec sleep 303", ":7");
+        try {
+            runSnippet(snipCli7);
+            check(waitDead(client7, 3000L), "Client sweep must kill xfce4-session bound to DISPLAY=:7");
+            check(server7.isAlive(), "Client-only sweep must NOT kill the :7 server");
+            check(other8.isAlive() && bystander.isAlive(), "Sweep must not touch other displays or unrelated processes");
+            runSnippet(snipSrv7);
+            check(waitDead(server7, 3000L), "Server sweep must kill Xtigervnc :7");
+            check(other8.isAlive() && bystander.isAlive(), "Server sweep must not touch other displays or bystanders");
+        } finally {
+            server7.destroyForcibly();
+            client7.destroyForcibly();
+            other8.destroyForcibly();
+            bystander.destroyForcibly();
+        }
+
+        // 3) Public API contract for lifecycle & orientation
+        Method stopAsync = DebianTermService.class.getMethod("stopDesktopProcessesAsync", boolean.class, boolean.class);
+        check(Modifier.isPublic(stopAsync.getModifiers()) && Modifier.isStatic(stopAsync.getModifiers()),
+            "DebianTermService.stopDesktopProcessesAsync must be public static");
+        check(Modifier.isPublic(DebianTermService.class.getMethod("removeSessionKeepDesktopProcesses", TerminalSession.class)
+            .getModifiers()), "removeSessionKeepDesktopProcesses must be public");
+        check(Modifier.isPublic(DebianTermService.class.getMethod("isSessionRootMode", TerminalSession.class)
+            .getModifiers()), "isSessionRootMode must be public");
+        check(Modifier.isPublic(LorieView.class.getMethod("setPreferredOrientation", String.class).getModifiers()),
+            "LorieView.setPreferredOrientation must be public");
+        check(Modifier.isPublic(RfbClient.class.getMethod("requestDesktopResize", int.class, int.class).getModifiers()),
+            "RfbClient.requestDesktopResize must be public");
+        boolean hasSizeListener = false;
+        for (Method m : Class.forName("com.debianchroot.term.VncCanvasView", false, VerifyAll.class.getClassLoader())
+                .getMethods()) {
+            if (m.getName().equals("setSizeChangeListener")) {
+                hasSizeListener = true;
+            }
+        }
+        check(hasSizeListener, "VncCanvasView.setSizeChangeListener must exist");
+
+        // 4) Live RFB resize via ExtendedDesktopSize (-308) + SetDesktopSize (251)
+        final AtomicReference<String> srvErr = new AtomicReference<>();
+        final AtomicBoolean sawExtEncoding = new AtomicBoolean(false);
+        final AtomicReference<int[]> setSize = new AtomicReference<>();
+        final CountDownLatch resized = new CountDownLatch(1);
+        final AtomicReference<int[]> resizeSeen = new AtomicReference<>();
+        final ServerSocket ss = new ServerSocket(0, 1, InetAddress.getLoopbackAddress());
+        int port = ss.getLocalPort();
+
+        Thread srv = new Thread(() -> {
+            try (Socket s = ss.accept()) {
+                DataInputStream dis = new DataInputStream(s.getInputStream());
+                DataOutputStream dos = new DataOutputStream(s.getOutputStream());
+                dos.write("RFB 003.008\n".getBytes(StandardCharsets.US_ASCII));
+                dos.flush();
+                dis.readFully(new byte[12]);
+                dos.writeByte(1);
+                dos.writeByte(1);
+                dos.flush();
+                check(dis.readUnsignedByte() == 1, "Expected Security None");
+                dos.writeInt(0);
+                dos.flush();
+                dis.readUnsignedByte(); // ClientInit
+                dos.writeShort(1280);
+                dos.writeShort(720);
+                dos.write(new byte[16]);
+                byte[] nm = "MockVnc".getBytes(StandardCharsets.UTF_8);
+                dos.writeInt(nm.length);
+                dos.write(nm);
+                dos.flush();
+
+                dis.readFully(new byte[20]); // SetPixelFormat
+                check(dis.readUnsignedByte() == 2, "Expected SetEncodings");
+                dis.readUnsignedByte();
+                int n = dis.readUnsignedShort();
+                for (int i = 0; i < n; i++) {
+                    if (dis.readInt() == RfbClient.ENCODING_EXTENDED_DESKTOP_SIZE) {
+                        sawExtEncoding.set(true);
+                    }
+                }
+                dis.readFully(new byte[10]); // FramebufferUpdateRequest
+                writeExtendedDesktopSize(dos, 0, 0, 1280, 720, 42);
+
+                long deadline = System.currentTimeMillis() + 8000L;
+                while (System.currentTimeMillis() < deadline) {
+                    int t = dis.read();
+                    if (t == -1) break;
+                    if (t == 3) {
+                        dis.readFully(new byte[9]);
+                    } else if (t == 5) {
+                        dis.readFully(new byte[5]);
+                    } else if (t == 251) {
+                        byte[] b = new byte[23];
+                        dis.readFully(b);
+                        int w = ((b[1] & 0xff) << 8) | (b[2] & 0xff);
+                        int h = ((b[3] & 0xff) << 8) | (b[4] & 0xff);
+                        int id = ((b[7] & 0xff) << 24) | ((b[8] & 0xff) << 16) | ((b[9] & 0xff) << 8) | (b[10] & 0xff);
+                        check(b[5] == 1, "SetDesktopSize must carry exactly 1 screen");
+                        setSize.set(new int[] { w, h, id });
+                        writeExtendedDesktopSize(dos, 1, 0, w, h, id);
+                    } else {
+                        break;
+                    }
+                }
+            } catch (Throwable t) {
+                srvErr.set(t.toString());
+            } finally {
+                try { ss.close(); } catch (Exception ignored) { }
+            }
+        }, "MockRfbResizeServer");
+        srv.setDaemon(true);
+        srv.start();
+
+        RfbClient client = new RfbClient();
+        try {
+            client.connectWithRetry("127.0.0.1", port, "", 5, 50L, new RfbClient.FrameListener() {
+                @Override public void onConnected(int width, int height, String desktopName) { }
+                @Override
+                public void onFramebufferResize(int width, int height) {
+                    if (width == 720 && height == 1440) {
+                        resizeSeen.set(new int[] { width, height });
+                        resized.countDown();
+                    }
+                }
+                @Override public void onFrameUpdated(int[] pixels, int width, int height, int x, int y, int w, int h) { }
+                @Override public void onServerCutText(String text) { }
+                @Override public void onDisconnected(String reason) { }
+            });
+
+            long until = System.currentTimeMillis() + 4000L;
+            while (System.currentTimeMillis() < until && !client.supportsDesktopResize()) {
+                Thread.sleep(40L);
+            }
+            check(client.supportsDesktopResize(), "Client must detect ExtendedDesktopSize support (err=" + srvErr.get() + ")");
+            check(sawExtEncoding.get(), "SetEncodings must advertise ExtendedDesktopSize (-308)");
+            java.lang.reflect.Field wf = RfbClient.class.getDeclaredField("mWriteExecutor");
+            wf.setAccessible(true);
+            check(wf.get(client) != null, "RfbClient must maintain dedicated async mWriteExecutor to avoid NetworkOnMainThreadException");
+            client.sendPointerEvent(0, 10, 10);
+            check(client.requestDesktopResize(720, 1440), "requestDesktopResize must send SetDesktopSize when supported");
+            check(resized.await(4, TimeUnit.SECONDS), "Client must report resize to 720x1440 (err=" + srvErr.get() + ")");
+            int[] sent = setSize.get();
+            check(sent != null && sent[0] == 720 && sent[1] == 1440 && sent[2] == 42,
+                "Server must receive SetDesktopSize 720x1440 for screen id 42");
+            check(client.getWidth() == 720 && client.getHeight() == 1440, "Client framebuffer must follow resize");
+            check(!client.requestDesktopResize(720, 1440), "Requesting current size must be a no-op");
+        } finally {
+            client.disconnect();
+        }
+
+        System.out.println("[PASS] Test 30: Orphan X11/VNC sweeper, session scripts (sh -n), live RFB resize & lifecycle API");
     }
 
     private static String fetchText(String urlStr) throws Exception {

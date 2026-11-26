@@ -71,6 +71,7 @@ public final class DebianTermService extends Service {
     private final List<TerminalSession> mSessions = new ArrayList<>();
     private final Map<TerminalSession, String> mSessionNames = new HashMap<>();
     private final Map<TerminalSession, SessionKind> mSessionKinds = new HashMap<>();
+    private final Map<TerminalSession, Boolean> mSessionIsRoot = new HashMap<>();
     private PowerManager.WakeLock mWakeLock;
     private WifiManager.WifiLock mWifiLock;
     private boolean mClientVisible = false;
@@ -147,16 +148,20 @@ public final class DebianTermService extends Service {
                 stopAllSessionsAndSelf();
                 return START_NOT_STICKY;
             } else if (ACTION_ACQUIRE_WAKELOCK.equals(action)) {
+                new TerminalSettings(this).setAutoWakeLockEnabled(true);
                 if (!mSessions.isEmpty()) {
                     setWakeLockEnabled(true, false);
                 }
             } else if (ACTION_RELEASE_WAKELOCK.equals(action)) {
+                new TerminalSettings(this).setAutoWakeLockEnabled(false);
                 if (!mSessions.isEmpty()) {
                     setWakeLockEnabled(false, false);
                 }
             } else if (ACTION_TOGGLE_WAKELOCK.equals(action)) {
+                boolean willEnable = !isWakeLockHeld();
+                new TerminalSettings(this).setAutoWakeLockEnabled(willEnable);
                 if (!mSessions.isEmpty()) {
-                    setWakeLockEnabled(!isWakeLockHeld(), false);
+                    setWakeLockEnabled(willEnable, false);
                 }
             } else if (ACTION_RUN_BOOT_TASKS.equals(action)) {
                 if (!mIsForeground) {
@@ -197,6 +202,7 @@ public final class DebianTermService extends Service {
         mSessions.clear();
         mSessionNames.clear();
         mSessionKinds.clear();
+        mSessionIsRoot.clear();
         mIsForeground = false;
         super.onDestroy();
     }
@@ -268,6 +274,7 @@ public final class DebianTermService extends Service {
                 it.remove();
                 mSessionNames.remove(s);
                 mSessionKinds.remove(s);
+                mSessionIsRoot.remove(s);
                 removed++;
             }
         }
@@ -286,6 +293,7 @@ public final class DebianTermService extends Service {
                 it.remove();
                 mSessionNames.remove(s);
                 mSessionKinds.remove(s);
+                mSessionIsRoot.remove(s);
                 removed++;
             }
         }
@@ -384,7 +392,7 @@ public final class DebianTermService extends Service {
             String suBin = ChrootManager.resolveWorkingSuPath();
             String rootCmd = ChrootManager.buildRootExecCommand(chrootPath, scriptPath, innerDebianCmd);
             String shCmd = "exec " + ChrootManager.shellQuote(suBin) + " -c " + ChrootManager.shellQuote(rootCmd);
-            return createRawSession("/system/bin/sh", shCmd, name, kind, client);
+            return markRoot(createRawSession("/system/bin/sh", shCmd, name, kind, client), isRootMode);
         } else {
             java.io.File script = ProotManager.getLauncherScript(this);
             try {
@@ -394,11 +402,11 @@ public final class DebianTermService extends Service {
             } catch (java.io.IOException e) {
                 String errCmd = "echo " + ChrootManager.shellQuote("Error preparando script PRoot: " + e.getMessage())
                     + "; exec /system/bin/sh";
-                return createRawSession("/system/bin/sh", errCmd, name, kind, client);
+                return markRoot(createRawSession("/system/bin/sh", errCmd, name, kind, client), isRootMode);
             }
             String shCmd = "exec " + ChrootManager.shellQuote(script.getAbsolutePath()) + " -c "
                 + ChrootManager.shellQuote(innerDebianCmd);
-            return createRawSession("/system/bin/sh", shCmd, name, kind, client);
+            return markRoot(createRawSession("/system/bin/sh", shCmd, name, kind, client), isRootMode);
         }
     }
 
@@ -458,7 +466,7 @@ public final class DebianTermService extends Service {
                 + x11ServerCmd + "\n"
                 + ChrootManager.buildRootExecCommand(chrootPath, scriptPath, x11ClientCmd);
             String shCmd = "exec " + ChrootManager.shellQuote(suBin) + " -c " + ChrootManager.shellQuote(rootCmd);
-            return createRawSession("/system/bin/sh", shCmd, label, SessionKind.DESKTOP_X11, client);
+            return markRoot(createRawSession("/system/bin/sh", shCmd, label, SessionKind.DESKTOP_X11, client), isRootMode);
         } else {
             java.io.File script = ProotManager.getLauncherScript(this);
             try {
@@ -467,11 +475,11 @@ public final class DebianTermService extends Service {
             } catch (java.io.IOException e) {
                 String errCmd = "echo " + ChrootManager.shellQuote("Error preparando script PRoot: " + e.getMessage())
                     + "; exec /system/bin/sh";
-                return createRawSession("/system/bin/sh", errCmd, label, SessionKind.DESKTOP_X11, client);
+                return markRoot(createRawSession("/system/bin/sh", errCmd, label, SessionKind.DESKTOP_X11, client), isRootMode);
             }
             String shCmd = x11ServerCmd + "\n" + ChrootManager.shellQuote(script.getAbsolutePath())
                 + " -c " + ChrootManager.shellQuote(x11ClientCmd) + "\n";
-            return createRawSession("/system/bin/sh", shCmd, label, SessionKind.DESKTOP_X11, client);
+            return markRoot(createRawSession("/system/bin/sh", shCmd, label, SessionKind.DESKTOP_X11, client), isRootMode);
         }
     }
 
@@ -548,19 +556,101 @@ public final class DebianTermService extends Service {
     }
 
     public void removeSession(TerminalSession session) {
+        removeSessionInternal(session, true);
+    }
+
+    /** Removes a session without sweeping X11/VNC processes (used right before relaunching a desktop). */
+    public void removeSessionKeepDesktopProcesses(TerminalSession session) {
+        removeSessionInternal(session, false);
+    }
+
+    private void removeSessionInternal(TerminalSession session, boolean stopDesktopProcesses) {
         if (session == null) return;
+        SessionKind kind = mSessionKinds.get(session);
+        boolean wasRoot = Boolean.TRUE.equals(mSessionIsRoot.get(session));
         session.finishGracefully(GRACEFUL_EXIT_TIMEOUT_MS);
         mSessions.remove(session);
         mSessionNames.remove(session);
         mSessionKinds.remove(session);
+        mSessionIsRoot.remove(session);
         refreshForegroundState();
+        if (stopDesktopProcesses && (kind == SessionKind.DESKTOP_X11 || kind == SessionKind.DESKTOP_VNC)) {
+            stopDesktopProcessesAsync(wasRoot, kind == SessionKind.DESKTOP_X11);
+        }
+    }
+
+    public boolean isSessionRootMode(TerminalSession session) {
+        return Boolean.TRUE.equals(mSessionIsRoot.get(session));
+    }
+
+    private TerminalSession markRoot(TerminalSession session, boolean isRootMode) {
+        mSessionIsRoot.put(session, isRootMode);
+        return session;
+    }
+
+    /**
+     * Root (su) X11/VNC servers run as UID 0 and cannot be signalled from the app UID, so they would
+     * survive "Detener" and block the next launch ("server already running"). This sweeps them.
+     */
+    public static void stopDesktopProcessesAsync(final boolean isRootMode, final boolean isX11) {
+        Thread t = new Thread(() -> {
+            String cmd = DesktopManager.buildCleanupDisplayProcessesSnippet(
+                isX11 ? DesktopManager.X11_DISPLAY : DesktopManager.VNC_DISPLAY, true);
+            if (isRootMode) {
+                try {
+                    ChrootManager.execSu(cmd, 8);
+                } catch (Throwable ignored) {
+                }
+            }
+            Process p = null;
+            try {
+                p = new ProcessBuilder("/system/bin/sh", "-c", cmd).redirectErrorStream(true).start();
+                try {
+                    p.getOutputStream().close();
+                } catch (java.io.IOException ignored) {
+                }
+                long deadline = System.currentTimeMillis() + 4000L;
+                while (System.currentTimeMillis() < deadline) {
+                    try {
+                        p.exitValue();
+                        break;
+                    } catch (IllegalThreadStateException running) {
+                        Thread.sleep(80L);
+                    }
+                }
+            } catch (Throwable ignored) {
+            } finally {
+                if (p != null) {
+                    p.destroy();
+                }
+            }
+        }, "DebianTerm-DesktopCleanup");
+        t.setDaemon(true);
+        t.start();
     }
 
     public void stopAllSessionsAndSelf() {
         final List<TerminalSession> toClose = new ArrayList<>(mSessions);
+        boolean hadX11 = false;
+        boolean hadVnc = false;
+        boolean x11Root = false;
+        boolean vncRoot = false;
+        for (TerminalSession s : toClose) {
+            SessionKind k = mSessionKinds.get(s);
+            if (k == SessionKind.DESKTOP_X11) {
+                hadX11 = true;
+                x11Root = Boolean.TRUE.equals(mSessionIsRoot.get(s));
+            } else if (k == SessionKind.DESKTOP_VNC) {
+                hadVnc = true;
+                vncRoot = Boolean.TRUE.equals(mSessionIsRoot.get(s));
+            }
+        }
         mSessions.clear();
         mSessionNames.clear();
         mSessionKinds.clear();
+        mSessionIsRoot.clear();
+        if (hadX11) stopDesktopProcessesAsync(x11Root, true);
+        if (hadVnc) stopDesktopProcessesAsync(vncRoot, false);
         releaseWakeLock();
         notifyWakeLockChanged();
 
@@ -640,7 +730,9 @@ public final class DebianTermService extends Service {
     }
 
     public void toggleWakeLock() {
-        setWakeLockEnabled(!isWakeLockHeld(), true);
+        boolean willEnable = !isWakeLockHeld();
+        new TerminalSettings(this).setAutoWakeLockEnabled(willEnable);
+        setWakeLockEnabled(willEnable, true);
     }
 
     @SuppressWarnings("deprecation")

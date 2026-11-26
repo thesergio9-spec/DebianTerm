@@ -6,12 +6,13 @@ import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Handler;
 import android.os.Looper;
+import android.text.TextUtils;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.HapticFeedbackConstants;
 import android.view.MotionEvent;
 import android.view.View;
-import android.widget.GridLayout;
+import android.widget.LinearLayout;
 import android.widget.TextView;
 
 import java.util.ArrayList;
@@ -23,7 +24,7 @@ import java.util.Locale;
  * Termux-style extra keys toolbar with CTRL/ALT latch + lock, long-press alternates,
  * key auto-repeat on navigation keys, full/compact/hidden layout modes, presets & custom specs.
  */
-public final class ExtraKeysBarView extends GridLayout {
+public final class ExtraKeysBarView extends LinearLayout {
 
     public interface Listener {
         void onKeyButton(String keyCode, boolean ctrl, boolean alt);
@@ -103,10 +104,17 @@ public final class ExtraKeysBarView extends GridLayout {
 
     public ExtraKeysBarView(Context context) {
         super(context);
+        setOrientation(VERTICAL);
         setBackgroundColor(mBgColor);
         int pad = dp(2);
         setPadding(pad, pad, pad, pad);
         rebuildButtons();
+    }
+
+    @Override
+    protected void onDetachedFromWindow() {
+        mHandler.removeCallbacksAndMessages(null);
+        super.onDetachedFromWindow();
     }
 
     /**
@@ -368,6 +376,7 @@ public final class ExtraKeysBarView extends GridLayout {
     }
 
     private void rebuildButtons() {
+        mHandler.removeCallbacksAndMessages(null);
         removeAllViews();
         mCtrlView = null;
         mAltView = null;
@@ -389,15 +398,19 @@ public final class ExtraKeysBarView extends GridLayout {
             }
         }
 
-        setColumnCount(maxCols);
-        setRowCount(rows.size());
-
         int btnHeight = dp(compact ? 38 : (rows.size() == 1 ? 38 : 34));
         int margin = dp(2);
         float textSp = compact ? 12f : (maxCols >= 9 ? 10f : 11.5f);
 
         for (int r = 0; r < rows.size(); r++) {
             List<KeySpec> rowSpecs = rows.get(r);
+            LinearLayout rowLayout = new LinearLayout(getContext());
+            rowLayout.setOrientation(HORIZONTAL);
+            rowLayout.setWeightSum((float) maxCols);
+            LayoutParams rowLp = new LayoutParams(
+                LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT);
+            addView(rowLayout, rowLp);
+
             for (int c = 0; c < rowSpecs.size(); c++) {
                 final KeySpec spec = rowSpecs.get(c);
                 int colSpan = (c == rowSpecs.size() - 1 && rowSpecs.size() < maxCols)
@@ -409,6 +422,10 @@ public final class ExtraKeysBarView extends GridLayout {
                 btn.setTextSize(TypedValue.COMPLEX_UNIT_SP, textSp);
                 btn.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
                 btn.setSingleLine(true);
+                btn.setEllipsize(TextUtils.TruncateAt.END);
+                btn.setMinWidth(0);
+                btn.setMinimumWidth(0);
+                btn.setPadding(dp(1), 0, dp(1), 0);
                 btn.setTextColor(mTextColor);
                 if (spec.altLabel != null) {
                     btn.setText(spec.label + "·" + spec.altLabel);
@@ -417,9 +434,7 @@ public final class ExtraKeysBarView extends GridLayout {
                 }
                 btn.setBackground(makeRoundedBg(mBtnColor));
 
-                LayoutParams lp = new LayoutParams(spec(r, 1f), spec(c, colSpan, (float) colSpan));
-                lp.width = 0;
-                lp.height = btnHeight;
+                LayoutParams lp = new LayoutParams(0, btnHeight, (float) colSpan);
                 lp.setMargins(margin, margin, margin, margin);
                 btn.setLayoutParams(lp);
 
@@ -430,7 +445,7 @@ public final class ExtraKeysBarView extends GridLayout {
                 }
 
                 attachTouchBehavior(btn, spec);
-                addView(btn);
+                rowLayout.addView(btn);
             }
         }
         refreshModifierVisuals();

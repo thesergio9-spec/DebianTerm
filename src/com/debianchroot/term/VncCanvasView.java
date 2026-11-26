@@ -37,6 +37,12 @@ public final class VncCanvasView extends View {
 
     private Bitmap mBitmap;
     private RfbClient mClient;
+
+    public interface SizeChangeListener {
+        void onCanvasSizeChanged(int width, int height);
+    }
+
+    private SizeChangeListener mSizeChangeListener;
     private int mFbWidth = 0;
     private int mFbHeight = 0;
 
@@ -97,6 +103,19 @@ public final class VncCanvasView extends View {
         });
     }
 
+    public void setSizeChangeListener(SizeChangeListener listener) {
+        mSizeChangeListener = listener;
+    }
+
+    @Override
+    protected void onSizeChanged(int w, int h, int oldw, int oldh) {
+        super.onSizeChanged(w, h, oldw, oldh);
+        resetZoom();
+        if (w > 0 && h > 0 && (w != oldw || h != oldh) && mSizeChangeListener != null) {
+            mSizeChangeListener.onCanvasSizeChanged(w, h);
+        }
+    }
+
     public void attachClient(RfbClient client) {
         mClient = client;
     }
@@ -152,10 +171,16 @@ public final class VncCanvasView extends View {
                 mBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
                 mBitmap.eraseColor(Color.parseColor("#0D1117"));
             }
+            boolean hadFb = mFbWidth > 0 && mFbHeight > 0;
+            if (hadFb && (mFbWidth != width || mFbHeight != height)) {
+                mCursorX = Math.max(0f, Math.min(width - 1f, mCursorX * width / (float) mFbWidth));
+                mCursorY = Math.max(0f, Math.min(height - 1f, mCursorY * height / (float) mFbHeight));
+            } else if (!hadFb) {
+                mCursorX = width / 2f;
+                mCursorY = height / 2f;
+            }
             mFbWidth = width;
             mFbHeight = height;
-            mCursorX = width / 2f;
-            mCursorY = height / 2f;
         }
         resetZoom();
         postInvalidate();

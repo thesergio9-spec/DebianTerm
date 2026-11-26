@@ -250,6 +250,68 @@ public final class DesktopManager {
             "echo 'Ya puedes volver al Panel de Inicio (⌂ Inicio) para abrir el Modo Gráfico.'\n";
     }
 
+    /**
+     * POSIX sh snippet that terminates orphaned X11/VNC servers and desktop session clients bound to
+     * {@code display}. Processes carrying the marker {@code _dt_kill_display} in their argv (this very
+     * script and its ancestors) are skipped. When {@code includeServer} is false only desktop clients
+     * (xfce4-session, lxsession, dbus-launch...) whose environment has DISPLAY=display are killed.
+     */
+    public static String buildCleanupDisplayProcessesSnippet(String display, boolean includeServer) {
+        String disp = (display == null || display.trim().isEmpty()) ? X11_DISPLAY : display.trim();
+        boolean x11 = X11_DISPLAY.equals(disp);
+        String serverPattern = x11
+            ? "*com.termux.x11.CmdEntryPoint*|*debianterm-x11*"
+            : "*Xtigervnc\\ " + disp + "*|*Xvnc\\ " + disp + "*";
+        StringBuilder sb = new StringBuilder();
+        sb.append("_dt_kill_display() {\n");
+        sb.append("    _dt_disp=\"$1\"\n");
+        sb.append("    _dt_srv=\"$2\"\n");
+        sb.append("    _dt_pids=''\n");
+        sb.append("    for _dt_p in /proc/[0-9]*; do\n");
+        sb.append("        _dt_pid=${_dt_p#/proc/}\n");
+        sb.append("        [ \"$_dt_pid\" = \"$$\" ] && continue\n");
+        sb.append("        [ -r \"$_dt_p/cmdline\" ] || continue\n");
+        sb.append("        _dt_cmd=$(tr '\\0' ' ' < \"$_dt_p/cmdline\" 2>/dev/null)\n");
+        sb.append("        [ -n \"$_dt_cmd\" ] || continue\n");
+        sb.append("        case \"$_dt_cmd\" in *_dt_kill_display*) continue ;; esac\n");
+        sb.append("        _dt_hit=0\n");
+        sb.append("        if [ \"$_dt_srv\" = 1 ]; then\n");
+        sb.append("            case \"$_dt_cmd\" in\n");
+        sb.append("                ").append(serverPattern).append(") _dt_hit=1 ;;\n");
+        sb.append("            esac\n");
+        sb.append("        fi\n");
+        sb.append("        if [ \"$_dt_hit\" = 0 ]; then\n");
+        sb.append("            case \"$_dt_cmd\" in\n");
+        sb.append("                *startxfce4*|*xfce4-session*|*startlxde*|*lxsession*|*dbus-launch*)\n");
+        sb.append("                    if tr '\\0' '\\n' < \"$_dt_p/environ\" 2>/dev/null | grep -qx \"DISPLAY=$_dt_disp\"; then _dt_hit=1; fi ;;\n");
+        sb.append("            esac\n");
+        sb.append("        fi\n");
+        sb.append("        if [ \"$_dt_hit\" = 1 ]; then _dt_pids=\"$_dt_pids $_dt_pid\"; fi\n");
+        sb.append("    done\n");
+        sb.append("    [ -n \"$_dt_pids\" ] || return 0\n");
+        sb.append("    kill -TERM $_dt_pids 2>/dev/null\n");
+        sb.append("    _dt_i=0\n");
+        sb.append("    _dt_alive=1\n");
+        sb.append("    while [ $_dt_i -lt 15 ]; do\n");
+        sb.append("        _dt_alive=0\n");
+        sb.append("        for _dt_k in $_dt_pids; do\n");
+        sb.append("            if kill -0 \"$_dt_k\" 2>/dev/null; then _dt_alive=1; fi\n");
+        sb.append("        done\n");
+        sb.append("        [ \"$_dt_alive\" = 0 ] && break\n");
+        sb.append("        _dt_i=$((_dt_i + 1))\n");
+        sb.append("        sleep 0.1\n");
+        sb.append("    done\n");
+        sb.append("    if [ \"$_dt_alive\" = 1 ]; then\n");
+        sb.append("        kill -KILL $_dt_pids 2>/dev/null\n");
+        sb.append("        sleep 0.1\n");
+        sb.append("    fi\n");
+        sb.append("    return 0\n");
+        sb.append("}\n");
+        sb.append("_dt_kill_display ").append(ChrootManager.shellQuote(disp)).append(' ')
+            .append(includeServer ? '1' : '0').append('\n');
+        return sb.toString();
+    }
+
     private static String buildDesktopSessionPrep(String desktopId) {
         StringBuilder sb = new StringBuilder();
         if (DESKTOP_LXDE.equals(desktopId)) {
@@ -258,7 +320,18 @@ public final class DesktopManager {
             sb.append("    printf '%s\\n' '[Desktop Entry]' 'Type=Application' 'Name=LXPolKit' 'Hidden=true' > /root/.config/autostart/lxpolkit.desktop\n");
             sb.append("fi\n");
         }
+        if (DESKTOP_LXDE.equals(desktopId)) {
+            sb.append("mkdir -p /root/.config/lxsession/LXDE\n");
+            sb.append("if [ ! -f /root/.config/lxsession/LXDE/desktop.conf ]; then\n");
+            sb.append("    if [ -f /etc/xdg/lxsession/LXDE/desktop.conf ]; then\n");
+            sb.append("        sed 's|^polkit/command=.*|polkit/command=|' /etc/xdg/lxsession/LXDE/desktop.conf > /root/.config/lxsession/LXDE/desktop.conf.tmp 2>/dev/null && [ -s /root/.config/lxsession/LXDE/desktop.conf.tmp ] && mv /root/.config/lxsession/LXDE/desktop.conf.tmp /root/.config/lxsession/LXDE/desktop.conf || rm -f /root/.config/lxsession/LXDE/desktop.conf.tmp\n");
+            sb.append("    else\n");
+            sb.append("        printf '%s\\n' '[Session]' 'windows_manager/command=openbox-lxde' 'polkit/command=' > /root/.config/lxsession/LXDE/desktop.conf\n");
+            sb.append("    fi\n");
+            sb.append("fi\n");
+        }
         sb.append("xsetroot -solid '#1B2838' 2>/dev/null || true\n");
+        sb.append("xset s off -dpms 2>/dev/null || xset s off 2>/dev/null || true\n");
         return sb.toString();
     }
 
@@ -281,6 +354,7 @@ public final class DesktopManager {
             "    dbus-uuidgen --ensure=/etc/machine-id 2>/dev/null || true\n" +
             "    dbus-uuidgen --ensure 2>/dev/null || true\n" +
             "fi\n" +
+            buildCleanupDisplayProcessesSnippet(VNC_DISPLAY, true) +
             "rm -f /tmp/.X1-lock /tmp/.X11-unix/X1 2>/dev/null || true\n" +
             "mkdir -p /tmp/.X11-unix /tmp/runtime-root\n" +
             "chmod 1777 /tmp /tmp/.X11-unix 2>/dev/null || true\n" +
@@ -333,6 +407,7 @@ public final class DesktopManager {
             "mkdir -p /tmp/.X11-unix /tmp/runtime-root\n" +
             "chmod 1777 /tmp /tmp/.X11-unix 2>/dev/null || true\n" +
             "chmod 700 /tmp/runtime-root 2>/dev/null || true\n" +
+            buildCleanupDisplayProcessesSnippet(X11_DISPLAY, false) +
             "export DISPLAY=" + X11_DISPLAY + "\n" +
             "export XDG_RUNTIME_DIR=/tmp/runtime-root\n" +
             "unset SESSION_MANAGER DBUS_SESSION_BUS_ADDRESS\n" +
@@ -366,6 +441,7 @@ public final class DesktopManager {
         } else {
             sb.append("ROOT_HOST=$(dirname \"$TMP_HOST\")\n");
         }
+        sb.append(buildCleanupDisplayProcessesSnippet(X11_DISPLAY, true));
         sb.append("mkdir -p \"$TMP_HOST/.X11-unix\"\n");
         sb.append("chmod 1777 \"$TMP_HOST\" \"$TMP_HOST/.X11-unix\" 2>/dev/null || true\n");
         sb.append("rm -f \"$TMP_HOST/.X0-lock\" \"$TMP_HOST/.X11-unix/X0\" 2>/dev/null || true\n");

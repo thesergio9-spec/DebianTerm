@@ -10,6 +10,9 @@ import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.zip.DataFormatException;
 import java.util.zip.Inflater;
 
@@ -26,6 +29,7 @@ public final class RfbClient {
     public static final int ENCODING_COPYRECT = 1;
     public static final int ENCODING_ZLIB = 6;
     public static final int ENCODING_DESKTOP_SIZE = -223;
+    public static final int ENCODING_EXTENDED_DESKTOP_SIZE = -308;
 
     public interface FrameListener {
         void onConnected(int width, int height, String desktopName);
@@ -43,12 +47,20 @@ public final class RfbClient {
     private InputStream mIn;
     private OutputStream mOut;
     private Thread mWorkerThread;
+    private volatile ExecutorService mWriteExecutor;
 
     private int mWidth = 0;
     private int mHeight = 0;
     private int[] mPixels = new int[0];
     private Inflater mZlibInflater;
     private byte[] mZlibDecompScratch = new byte[65536];
+
+    private volatile boolean mSupportsExtendedDesktopSize = false;
+    private volatile boolean mHasPrimaryScreen = false;
+    private volatile int mPrimaryScreenId = 0;
+    private volatile int mPrimaryScreenFlags = 0;
+    private volatile int mPendingResizeWidth = 0;
+    private volatile int mPendingResizeHeight = 0;
 
     public boolean isConnected() {
         return mConnected && !mClosed;
@@ -81,6 +93,7 @@ public final class RfbClient {
     public void disconnect() {
         mClosed = true;
         mConnected = false;
+        shutdownWriter();
         closeSocketQuietly();
         if (mZlibInflater != null) {
             try {
@@ -88,6 +101,14 @@ public final class RfbClient {
             } catch (Exception ignored) {
             }
             mZlibInflater = null;
+        }
+    }
+
+    private void shutdownWriter() {
+        ExecutorService exec = mWriteExecutor;
+        mWriteExecutor = null;
+        if (exec != null) {
+            exec.shutdownNow();
         }
     }
 
@@ -132,6 +153,57 @@ public final class RfbClient {
         writePacket(msg);
     }
 
+    public boolean supportsDesktopResize() {
+        return mSupportsExtendedDesktopSize && mHasPrimaryScreen;
+    }
+
+    /**
+     * Asks the VNC server to resize its desktop (RFB SetDesktopSize). Returns true when the request
+     * was sent now; otherwise the target is remembered and sent after the server advertises support.
+     */
+    public boolean requestDesktopResize(int width, int height) {
+        int w = Math.max(480, Math.min(3840, width));
+        int h = Math.max(480, Math.min(3840, height));
+        if (!isConnected() || !mSupportsExtendedDesktopSize || !mHasPrimaryScreen) {
+            mPendingResizeWidth = w;
+            mPendingResizeHeight = h;
+            return false;
+        }
+        mPendingResizeWidth = 0;
+        mPendingResizeHeight = 0;
+        if (w == mWidth && h == mHeight) {
+            return false;
+        }
+        sendSetDesktopSizePacket(w, h);
+        sendFramebufferUpdateRequest(true, 0, 0, mWidth, mHeight);
+        return true;
+    }
+
+    private void sendSetDesktopSizePacket(int w, int h) {
+        byte[] msg = new byte[24];
+        msg[0] = (byte) 251;
+        msg[2] = (byte) ((w >> 8) & 0xff);
+        msg[3] = (byte) (w & 0xff);
+        msg[4] = (byte) ((h >> 8) & 0xff);
+        msg[5] = (byte) (h & 0xff);
+        msg[6] = 1; // number of screens
+        int id = mPrimaryScreenId;
+        msg[8] = (byte) ((id >> 24) & 0xff);
+        msg[9] = (byte) ((id >> 16) & 0xff);
+        msg[10] = (byte) ((id >> 8) & 0xff);
+        msg[11] = (byte) (id & 0xff);
+        msg[16] = (byte) ((w >> 8) & 0xff);
+        msg[17] = (byte) (w & 0xff);
+        msg[18] = (byte) ((h >> 8) & 0xff);
+        msg[19] = (byte) (h & 0xff);
+        int fl = mPrimaryScreenFlags;
+        msg[20] = (byte) ((fl >> 24) & 0xff);
+        msg[21] = (byte) ((fl >> 16) & 0xff);
+        msg[22] = (byte) ((fl >> 8) & 0xff);
+        msg[23] = (byte) (fl & 0xff);
+        writePacket(msg);
+    }
+
     public void requestFullUpdate() {
         if (!isConnected() || mWidth <= 0 || mHeight <= 0) return;
         sendFramebufferUpdateRequest(false, 0, 0, mWidth, mHeight);
@@ -146,6 +218,8 @@ public final class RfbClient {
         FrameListener listener
     ) {
         String disconnectReason = "Desconectado";
+        mSupportsExtendedDesktopSize = false;
+        mHasPrimaryScreen = false;
         try {
             Socket sock = null;
             IOException lastErr = null;
@@ -186,19 +260,23 @@ public final class RfbClient {
             mSocket = sock;
             mIn = new BufferedInputStream(sock.getInputStream(), 65536);
             mOut = sock.getOutputStream();
+            mWriteExecutor = Executors.newSingleThreadExecutor(r -> {
+                Thread t = new Thread(r, "DebianTerm-RFB-Writer");
+                t.setDaemon(true);
+                return t;
+            });
             mZlibInflater = new Inflater();
 
             String desktopName = performHandshake(password);
-            mConnected = true;
-
             sendSetPixelFormat32Bgrx();
             sendSupportedEncodings();
+            sendFramebufferUpdateRequest(false, 0, 0, mWidth, mHeight, true);
+            mConnected = true;
 
             if (listener != null) {
                 listener.onConnected(mWidth, mHeight, desktopName);
             }
 
-            sendFramebufferUpdateRequest(false, 0, 0, mWidth, mHeight);
             readServerMessages(listener);
         } catch (EOFException eof) {
             disconnectReason = "Sesión VNC cerrada por el servidor";
@@ -209,6 +287,7 @@ public final class RfbClient {
         } finally {
             boolean wasClosedByUser = mClosed;
             mConnected = false;
+            shutdownWriter();
             closeSocketQuietly();
             if (mZlibInflater != null) {
                 try {
@@ -242,7 +321,7 @@ public final class RfbClient {
         }
 
         byte[] replyVer = String.format("RFB 003.%03d\n", negotiatedMinor).getBytes(StandardCharsets.US_ASCII);
-        writePacket(replyVer);
+        writePacketSync(replyVer);
 
         if (negotiatedMinor == 3) {
             int secType = readInt32();
@@ -284,7 +363,7 @@ public final class RfbClient {
                 throw new IOException("El servidor VNC exige un método de autenticación no soportado");
             }
 
-            writePacket(new byte[] { (byte) chosen });
+            writePacketSync(new byte[] { (byte) chosen });
             if (chosen == 2) {
                 handleVncAuthChallenge(password == null ? "" : password);
             }
@@ -298,7 +377,7 @@ public final class RfbClient {
         }
 
         // ClientInit: shared = 1
-        writePacket(new byte[] { 1 });
+        writePacketSync(new byte[] { 1 });
 
         // ServerInit
         mWidth = readU16();
@@ -332,7 +411,7 @@ public final class RfbClient {
         Cipher cipher = Cipher.getInstance("DES/ECB/NoPadding");
         cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(key, "DES"));
         byte[] response = cipher.doFinal(challenge);
-        writePacket(response);
+        writePacketSync(response);
     }
 
     private void sendSetPixelFormat32Bgrx() {
@@ -354,7 +433,7 @@ public final class RfbClient {
         msg[14] = 16; // red-shift
         msg[15] = 8;  // green-shift
         msg[16] = 0;  // blue-shift
-        writePacket(msg);
+        writePacketSync(msg);
     }
 
     private void sendSupportedEncodings() {
@@ -362,6 +441,7 @@ public final class RfbClient {
             ENCODING_COPYRECT,
             ENCODING_ZLIB,
             ENCODING_RAW,
+            ENCODING_EXTENDED_DESKTOP_SIZE,
             ENCODING_DESKTOP_SIZE
         };
         byte[] msg = new byte[4 + encs.length * 4];
@@ -376,10 +456,14 @@ public final class RfbClient {
             msg[off + 2] = (byte) ((e >> 8) & 0xff);
             msg[off + 3] = (byte) (e & 0xff);
         }
-        writePacket(msg);
+        writePacketSync(msg);
     }
 
     private void sendFramebufferUpdateRequest(boolean incremental, int x, int y, int w, int h) {
+        sendFramebufferUpdateRequest(incremental, x, y, w, h, false);
+    }
+
+    private void sendFramebufferUpdateRequest(boolean incremental, int x, int y, int w, int h, boolean sync) {
         byte[] msg = new byte[10];
         msg[0] = 3; // FramebufferUpdateRequest
         msg[1] = (byte) (incremental ? 1 : 0);
@@ -391,7 +475,11 @@ public final class RfbClient {
         msg[7] = (byte) (w & 0xff);
         msg[8] = (byte) ((h >> 8) & 0xff);
         msg[9] = (byte) (h & 0xff);
-        writePacket(msg);
+        if (sync) {
+            writePacketSync(msg);
+        } else {
+            writePacket(msg);
+        }
     }
 
     private void readServerMessages(FrameListener listener) throws IOException, DataFormatException {
@@ -409,6 +497,46 @@ public final class RfbClient {
                         int rw = readU16();
                         int rh = readU16();
                         int enc = readInt32();
+
+                        if (enc == ENCODING_EXTENDED_DESKTOP_SIZE) {
+                            int numScreens = readU8();
+                            readExact(3);
+                            for (int s = 0; s < numScreens; s++) {
+                                int sid = readInt32();
+                                readU16();
+                                readU16();
+                                readU16();
+                                readU16();
+                                int sflags = readInt32();
+                                if (s == 0) {
+                                    mPrimaryScreenId = sid;
+                                    mPrimaryScreenFlags = sflags;
+                                    mHasPrimaryScreen = true;
+                                }
+                            }
+                            mSupportsExtendedDesktopSize = true;
+                            if (ry == 0 && rw > 0 && rh > 0 && rw <= 8192 && rh <= 8192
+                                && (rw != mWidth || rh != mHeight)) {
+                                mWidth = rw;
+                                mHeight = rh;
+                                mPixels = new int[rw * rh];
+                                Arrays.fill(mPixels, 0xFF0D1117);
+                                needFullAfterResize = true;
+                                if (listener != null) {
+                                    listener.onFramebufferResize(rw, rh);
+                                }
+                            }
+                            if (mPendingResizeWidth > 0 && mPendingResizeHeight > 0) {
+                                int pw = mPendingResizeWidth;
+                                int ph = mPendingResizeHeight;
+                                mPendingResizeWidth = 0;
+                                mPendingResizeHeight = 0;
+                                if (pw != mWidth || ph != mHeight) {
+                                    sendSetDesktopSizePacket(pw, ph);
+                                }
+                            }
+                            continue;
+                        }
 
                         if (enc == ENCODING_DESKTOP_SIZE) {
                             if (rw > 0 && rh > 0 && rw <= 8192 && rh <= 8192) {
@@ -555,10 +683,23 @@ public final class RfbClient {
         }
     }
 
-    private void writePacket(byte[] data) {
+    private void writePacket(final byte[] data) {
+        ExecutorService exec = mWriteExecutor;
+        if (exec != null && !mClosed) {
+            try {
+                exec.execute(() -> writePacketSync(data));
+                return;
+            } catch (RejectedExecutionException ignored) {
+                return;
+            }
+        }
+        writePacketSync(data);
+    }
+
+    private void writePacketSync(byte[] data) {
         synchronized (mOutLock) {
             OutputStream out = mOut;
-            if (out == null) return;
+            if (out == null || mClosed) return;
             try {
                 out.write(data);
                 out.flush();
