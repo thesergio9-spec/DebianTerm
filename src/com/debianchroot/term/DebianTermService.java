@@ -426,19 +426,35 @@ public final class DebianTermService extends Service {
         DesktopManager.DesktopStatus deskStatus,
         TerminalSessionClient client
     ) {
-        String sharedTmp = isRootMode
-            ? (chrootPath + "/tmp")
-            : new java.io.File(ProotManager.getRootfsDir(this), "tmp").getAbsolutePath();
-        String x11ServerCmd = DesktopManager.generateTermuxX11ServerCommand(
-            deskStatus.termuxX11ApkPath, deskStatus.termuxX11LibDir, sharedTmp);
+        String rootfsHost = isRootMode
+            ? chrootPath
+            : ProotManager.getRootfsDir(this).getAbsolutePath();
+        String sharedTmp = rootfsHost + "/tmp";
+        android.content.pm.ApplicationInfo appInfo = getApplicationInfo();
+        String apkPath = (deskStatus != null && deskStatus.termuxX11ApkPath != null && !deskStatus.termuxX11ApkPath.isEmpty())
+            ? deskStatus.termuxX11ApkPath
+            : (appInfo != null && appInfo.sourceDir != null ? appInfo.sourceDir : "");
+        String libDir = (deskStatus != null && deskStatus.termuxX11LibDir != null && !deskStatus.termuxX11LibDir.isEmpty())
+            ? deskStatus.termuxX11LibDir
+            : (appInfo != null && appInfo.nativeLibraryDir != null ? appInfo.nativeLibraryDir : "");
+        String x11ServerCmd = DesktopManager.generateBuiltInX11ServerCommand(
+            apkPath, libDir, sharedTmp, rootfsHost);
         String x11ClientCmd = DesktopManager.generateTermuxX11StartCommand(desktopId);
         String label = (DesktopManager.DESKTOP_LXDE.equals(desktopId) ? "LXDE X11" : "XFCE4 X11")
             + (isRootMode ? " (Root)" : " (PRoot)");
 
         if (isRootMode) {
             String suBin = ChrootManager.resolveWorkingSuPath();
-            // Prepare chroot mounts first so Termux:X11 creates .X11-unix/X0 inside the mounted tmpfs
+            StringBuilder envPrep = new StringBuilder();
+            for (String key : ANDROID_RUNTIME_ENV_KEYS) {
+                String val = System.getenv(key);
+                if (val != null && !val.isEmpty()) {
+                    envPrep.append("export ").append(key).append('=').append(ChrootManager.shellQuote(val)).append('\n');
+                }
+            }
+            // Prepare chroot mounts first so built-in X11 creates .X11-unix/X0 inside the mounted tmpfs
             String rootCmd = ChrootManager.buildEnsureRootMountsSnippet(chrootPath)
+                + envPrep.toString()
                 + x11ServerCmd + "\n"
                 + ChrootManager.buildRootExecCommand(chrootPath, scriptPath, x11ClientCmd);
             String shCmd = "exec " + ChrootManager.shellQuote(suBin) + " -c " + ChrootManager.shellQuote(rootCmd);
@@ -483,16 +499,40 @@ public final class DebianTermService extends Service {
         return createRawSession("/system/bin/sh", "exec /system/bin/sh", allocateSessionName("Android sh #"), SessionKind.ANDROID_SHELL, client);
     }
 
+    private static final String[] ANDROID_RUNTIME_ENV_KEYS = {
+        "BOOTCLASSPATH",
+        "DEX2OATBOOTCLASSPATH",
+        "SYSTEMSERVERCLASSPATH",
+        "ANDROID_ROOT",
+        "ANDROID_DATA",
+        "ANDROID_STORAGE",
+        "ANDROID_ASSETS",
+        "ANDROID_ART_ROOT",
+        "ANDROID_RUNTIME_ROOT",
+        "ANDROID_I18N_ROOT",
+        "ANDROID_TZDATA_ROOT"
+    };
+
+    public static String[] buildRawSessionEnv(String cwd) {
+        List<String> envList = new ArrayList<>();
+        envList.add("TERM=xterm-256color");
+        envList.add("COLORTERM=truecolor");
+        envList.add("LANG=C.UTF-8");
+        envList.add("HOME=" + (cwd != null ? cwd : "/"));
+        envList.add("PATH=/debug_ramdisk:/sbin:/product/bin:/apex/com.android.runtime/bin:/apex/com.android.art/bin:/system_ext/bin:/system/bin:/system/xbin:/odm/bin:/vendor/bin:/vendor/xbin");
+        for (String key : ANDROID_RUNTIME_ENV_KEYS) {
+            String val = System.getenv(key);
+            if (val != null && !val.isEmpty()) {
+                envList.add(key + "=" + val);
+            }
+        }
+        return envList.toArray(new String[0]);
+    }
+
     private TerminalSession createRawSession(String shellPath, String shCommand, String defaultName, SessionKind kind, TerminalSessionClient client) {
         String cwd = getFilesDir().getAbsolutePath();
         String[] args = { shellPath, "-c", shCommand };
-        String[] env = {
-            "TERM=xterm-256color",
-            "COLORTERM=truecolor",
-            "LANG=C.UTF-8",
-            "HOME=" + cwd,
-            "PATH=/debug_ramdisk:/sbin:/product/bin:/apex/com.android.runtime/bin:/apex/com.android.art/bin:/system_ext/bin:/system/bin:/system/xbin:/odm/bin:/vendor/bin:/vendor/xbin"
-        };
+        String[] env = buildRawSessionEnv(cwd);
 
         TerminalSession session = new TerminalSession(shellPath, cwd, args, env, DEFAULT_TRANSCRIPT_ROWS, client);
         session.mSessionName = defaultName;

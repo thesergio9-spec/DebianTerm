@@ -31,6 +31,7 @@ public final class TerminalSettings {
     private static final String KEY_DESKTOP_ENV = "desktop_env";
     private static final String KEY_GUI_BACKEND = "gui_backend";
     private static final String KEY_GUI_RESOLUTION = "gui_resolution";
+    private static final String KEY_GUI_ORIENTATION = "gui_orientation";
     private static final String KEY_AUTO_WAKELOCK = "auto_wakelock";
     private static final String KEY_SNIPPETS_DATA = "snippets_data_v1";
     private static final String KEY_FONT_ID = "font_id";
@@ -75,11 +76,18 @@ public final class TerminalSettings {
         "Fuente personalizada (.ttf / .otf)"
     };
 
+    public static final String GUI_RESOLUTION_FIT = "fit";
+
     public static final String[] ALL_GUI_RESOLUTIONS = {
+        GUI_RESOLUTION_FIT,
         "1280x720",
         "960x540",
         "1600x900"
     };
+
+    public static final String GUI_ORIENTATION_AUTO = "auto";
+    public static final String GUI_ORIENTATION_PORTRAIT = "portrait";
+    public static final String GUI_ORIENTATION_LANDSCAPE = "landscape";
 
     public static final int MIN_FONT_SIZE_PX = 16;
     public static final int MAX_FONT_SIZE_PX = 68;
@@ -382,6 +390,7 @@ public final class TerminalSettings {
         p.setProperty(KEY_DESKTOP_ENV, getDesktopEnv());
         p.setProperty(KEY_GUI_BACKEND, getGuiBackend());
         p.setProperty(KEY_GUI_RESOLUTION, getGuiResolution());
+        p.setProperty(KEY_GUI_ORIENTATION, getGuiOrientation());
         p.setProperty(KEY_BOOT_AUTOSTART_ENABLED, Boolean.toString(isBootAutostartEnabled()));
         p.setProperty(KEY_BOOT_AUTOSTART_TARGET, getBootAutostartTarget());
         p.setProperty(KEY_BOOT_AUTOSTART_SCRIPT, getBootAutostartScript());
@@ -415,6 +424,7 @@ public final class TerminalSettings {
         if (p.containsKey(KEY_DESKTOP_ENV)) setDesktopEnv(p.getProperty(KEY_DESKTOP_ENV));
         if (p.containsKey(KEY_GUI_BACKEND)) setGuiBackend(p.getProperty(KEY_GUI_BACKEND));
         if (p.containsKey(KEY_GUI_RESOLUTION)) setGuiResolution(p.getProperty(KEY_GUI_RESOLUTION));
+        if (p.containsKey(KEY_GUI_ORIENTATION)) setGuiOrientation(p.getProperty(KEY_GUI_ORIENTATION));
         if (p.containsKey(KEY_BOOT_AUTOSTART_ENABLED)) {
             setBootAutostartEnabled(Boolean.parseBoolean(p.getProperty(KEY_BOOT_AUTOSTART_ENABLED)));
         }
@@ -463,8 +473,8 @@ public final class TerminalSettings {
     }
 
     public String getGuiBackend() {
-        String b = mPrefs.getString(KEY_GUI_BACKEND, DesktopManager.BACKEND_VNC);
-        return DesktopManager.BACKEND_TERMUX_X11.equals(b) ? DesktopManager.BACKEND_TERMUX_X11 : DesktopManager.BACKEND_VNC;
+        String b = mPrefs.getString(KEY_GUI_BACKEND, DesktopManager.BACKEND_TERMUX_X11);
+        return DesktopManager.BACKEND_VNC.equals(b) ? DesktopManager.BACKEND_VNC : DesktopManager.BACKEND_TERMUX_X11;
     }
 
     public void setGuiBackend(String backend) {
@@ -489,6 +499,26 @@ public final class TerminalSettings {
             }
         }
         mPrefs.edit().putString(KEY_GUI_RESOLUTION, chosen).apply();
+    }
+
+    public static String getGuiResolutionDisplayLabel(String resOpt) {
+        return GUI_RESOLUTION_FIT.equals(resOpt) ? "Ajustar" : resOpt;
+    }
+
+    public String getGuiOrientation() {
+        String o = mPrefs.getString(KEY_GUI_ORIENTATION, GUI_ORIENTATION_AUTO);
+        if (GUI_ORIENTATION_PORTRAIT.equals(o) || GUI_ORIENTATION_LANDSCAPE.equals(o)) {
+            return o;
+        }
+        return GUI_ORIENTATION_AUTO;
+    }
+
+    public void setGuiOrientation(String orientation) {
+        String chosen = GUI_ORIENTATION_AUTO;
+        if (GUI_ORIENTATION_PORTRAIT.equals(orientation) || GUI_ORIENTATION_LANDSCAPE.equals(orientation)) {
+            chosen = orientation;
+        }
+        mPrefs.edit().putString(KEY_GUI_ORIENTATION, chosen).apply();
     }
 
     private static String sanitizePath(String raw) {

@@ -26,7 +26,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "[1/5] Descargando termux-app commit 952f309e6b..."
+echo "[1/7] Descargando termux-app commit 952f309e6b..."
 TERMUX_TAR="$TMP_DIR/termux-952f309e6b.tar.gz"
 curl -fsSL -L "https://github.com/qwerty123yucy/termux-app/archive/952f309e6b.tar.gz" -o "$TERMUX_TAR"
 tar -xzf "$TERMUX_TAR" -C "$TMP_DIR"
@@ -46,11 +46,11 @@ echo "=== terminal-view strings.xml ==="
 cat "$TERMUX_SRC/terminal-view/src/main/res/values/strings.xml"
 echo "================================"
 
-echo "[2/5] Descargando dependencias JAR..."
+echo "[2/7] Descargando dependencias JAR..."
 curl -fsSL -L "https://dl.google.com/dl/android/maven2/androidx/annotation/annotation/1.5.0/annotation-1.5.0.jar" -o libs/annotation-1.5.0.jar
 curl -fsSL -L "https://repo1.maven.org/maven2/org/tukaani/xz/1.9/xz-1.9.jar" -o libs/xz-1.9.jar
 
-echo "[3/5] Descargando y extrayendo libtermux.so v0.118.3..."
+echo "[3/7] Descargando y extrayendo libtermux.so v0.118.3..."
 APK_ARM64="$TMP_DIR/termux-arm64.apk"
 APK_ARMV7="$TMP_DIR/termux-armv7.apk"
 curl -fsSL -L "https://github.com/termux/termux-app/releases/download/v0.118.3/termux-app_v0.118.3%2Bgithub-debug_arm64-v8a.apk" -o "$APK_ARM64"
@@ -67,7 +67,7 @@ for i in range(0, len(args), 3):
             out.write(zf.read(src))
 PYEOF
 
-echo "[4/5] Descargando y verificando binarios PRoot Android (v26.10.08-a179d3e)..."
+echo "[4/7] Descargando y verificando binarios PRoot Android (v26.10.08-a179d3e)..."
 PROOT_BASE_URL="https://github.com/ahmed-alnassif/proot/releases/download/v26.10.08-a179d3e"
 PROOT_SUMS="$TMP_DIR/proot-checksums.txt"
 PROOT_ARM64_ZIP="$TMP_DIR/proot-aarch64.zip"
@@ -120,7 +120,28 @@ for i in range(0, len(args), 3):
     print(f"OK {zip_name} ({actual_sha[:12]}...) -> {out_dir}")
 PYEOF
 
-echo "[5/6] Descargando Nerd Font integrada (MesloLGS NF Regular, Apache-2.0)..."
+echo "[5/7] Descargando y extrayendo libXlorie.so (Termux:X11 X Server nativo, GPL-3.0)..."
+X11_APK="$TMP_DIR/termux-x11-universal.apk"
+curl -fsSL -L "https://github.com/termux/termux-x11/releases/download/nightly/termux-x11-universal-release.apk" -o "$X11_APK"
+python3 - "$X11_APK" << 'PYEOF'
+import hashlib, os, sys, zipfile
+
+apk_path = sys.argv[1]
+with zipfile.ZipFile(apk_path, "r") as zf:
+    for abi in ("arm64-v8a", "armeabi-v7a"):
+        raw = zf.read(f"lib/{abi}/libXlorie.so")
+        if len(raw) < 1000000 or raw[:4] != b"\x7fELF":
+            raise SystemExit(f"ERROR: libXlorie.so inválido para {abi} (size={len(raw)})")
+        dst = os.path.join("jniLibs", abi, "libXlorie.so")
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        with open(dst, "wb") as out:
+            out.write(raw)
+        os.chmod(dst, 0o755)
+        sha = hashlib.sha256(raw).hexdigest()
+        print(f"OK {abi}/libXlorie.so ({len(raw)} bytes, sha256={sha[:12]}...) -> {dst}")
+PYEOF
+
+echo "[6/7] Descargando Nerd Font integrada (MesloLGS NF Regular, Apache-2.0)..."
 FONT_URL="https://github.com/romkatv/powerlevel10k-media/raw/master/MesloLGS%20NF%20Regular.ttf"
 FONT_DST="assets/fonts/MesloLGS_NF_Regular.ttf"
 if [ ! -s "$FONT_DST" ]; then
@@ -137,9 +158,11 @@ if size < 100000 or magic not in (b"\x00\x01\x00\x00", b"OTTO", b"true", b"ttcf"
 print(f"OK Nerd Font ({size} bytes, magic={magic.hex()}) -> {path}")
 PYEOF
 
-echo "[6/6] Verificando simbolos JNI en libtermux.so y binarios PRoot..."
+echo "[7/7] Verificando simbolos JNI en libtermux.so, libXlorie.so y binarios PRoot..."
 readelf -Ws jniLibs/arm64-v8a/libtermux.so | grep Java_com_termux_terminal_JNI
 readelf -Ws jniLibs/armeabi-v7a/libtermux.so | grep Java_com_termux_terminal_JNI
-ls -la jniLibs/arm64-v8a/libproot*.so jniLibs/armeabi-v7a/libproot*.so
+readelf -Ws jniLibs/arm64-v8a/libXlorie.so | grep JNI_OnLoad
+readelf -Ws jniLibs/armeabi-v7a/libXlorie.so | grep JNI_OnLoad
+ls -la jniLibs/arm64-v8a/libproot*.so jniLibs/armeabi-v7a/libproot*.so jniLibs/*/libXlorie.so
 
 echo "setup-deps completado con exito."

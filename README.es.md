@@ -5,8 +5,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/thesergio9-spec/DebianTerm/releases/tag/v2.4.2">
-    <img src="https://img.shields.io/badge/release-v2.4.2-D70A53?style=flat-square" alt="Release v2.4.2">
+  <a href="https://github.com/thesergio9-spec/DebianTerm/releases/tag/v2.5.0">
+    <img src="https://img.shields.io/badge/release-v2.5.0-D70A53?style=flat-square" alt="Release v2.5.0">
   </a>
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/license-GPLv3-blue?style=flat-square" alt="Licencia GPLv3">
@@ -17,7 +17,7 @@
   </a>
 </p>
 
-**DebianTerm** (`v2.4.2`) es un **instalador completo de Debian 12 (Bookworm)** y emulador de terminal + escritorio gráfico para Android basado en el motor y teclado de Termux (`terminal-emulator` y `terminal-view`), con **verificación de requerimientos mínimos al iniciar**, selector **Terminal (CLI) vs Modo Gráfico Híbrido** y **dos caminos de ejecución totalmente funcionales**:
+**DebianTerm** (`v2.5.0`) es un **instalador completo de Debian 12 (Bookworm)** y emulador de terminal + escritorio gráfico para Android basado en el motor y teclado de Termux (`terminal-emulator` y `terminal-view`), con **verificación de requerimientos mínimos al iniciar**, selector **Terminal (CLI) vs Modo Gráfico Híbrido** y **dos caminos de ejecución totalmente funcionales**:
 
 1. **Camino 1 — Con Root (Chroot Nativo)**: máximo rendimiento del kernel Linux y montajes reales para dispositivos con Magisk, KernelSU o APatch.
 2. **Camino 2 — Sin Root (PRoot Integrado)**: motor `PRoot` empaquetado directamente en el APK (`arm64-v8a` y `armeabi-v7a`), **100% independiente de Termux**, para dispositivos sin acceso root.
@@ -28,14 +28,15 @@ Coexiste de forma independiente junto a Termux (`com.termux`) usando su propio p
 
 ## 📸 Capturas Reales
 
-> Capturadas en un Samsung Galaxy Note 10+ (Android 15) ejecutando DebianTerm `v2.4.1` y Debian 12 Bookworm.
+> Capturadas en un Samsung Galaxy Note 10+ (Android 15) ejecutando DebianTerm `v2.5.0` y Debian 12 Bookworm.
 
 <table>
   <tr>
-    <td align="center"><img src="docs/screenshots/01-dashboard.png" width="210" alt="Panel de Requisitos"><br><sub><b>Panel de Requisitos y Caminos</b></sub></td>
-    <td align="center"><img src="docs/screenshots/02-terminal-sixel.png" width="210" alt="Terminal Debian 12 con Sixel"><br><sub><b>Terminal Debian 12 y Sixel</b></sub></td>
-    <td align="center"><img src="docs/screenshots/03-drawer.png" width="210" alt="Menú Lateral Simplificado"><br><sub><b>Menú Lateral Compacto (v2.4.1)</b></sub></td>
-    <td align="center"><img src="docs/screenshots/04-about.png" width="210" alt="Acerca de y Apoyo en Ko-fi"><br><sub><b>Acerca de y Ko-fi</b></sub></td>
+    <td align="center"><img src="docs/screenshots/01-dashboard.png" width="170" alt="Panel de Requisitos"><br><sub><b>Panel de Requisitos y Caminos</b></sub></td>
+    <td align="center"><img src="docs/screenshots/02-terminal-sixel.png" width="170" alt="Terminal Debian 12 con Sixel"><br><sub><b>Terminal Debian 12 y Sixel</b></sub></td>
+    <td align="center"><img src="docs/screenshots/03-drawer.png" width="170" alt="Menú Lateral Simplificado"><br><sub><b>Menú Lateral Compacto (v2.4.1)</b></sub></td>
+    <td align="center"><img src="docs/screenshots/04-about.png" width="170" alt="Acerca de y Apoyo en Ko-fi"><br><sub><b>Acerca de y Ko-fi</b></sub></td>
+    <td align="center"><img src="docs/screenshots/05-desktop-x11.png" width="170" alt="Escritorio Gráfico X11 Nativo (LXDE)"><br><sub><b>Escritorio X11 Nativo (60 FPS • Vertical)</b></sub></td>
   </tr>
 </table>
 
@@ -45,7 +46,7 @@ Coexiste de forma independiente junto a Termux (`com.termux`) usando su propio p
 
 Descarga el APK compilado desde la última Release:
 
-- **[DebianTerm.apk (v2.4.2)](https://github.com/thesergio9-spec/DebianTerm/releases/download/v2.4.2/DebianTerm.apk)**
+- **[DebianTerm.apk (v2.5.0)](https://github.com/thesergio9-spec/DebianTerm/releases/download/v2.5.0/DebianTerm.apk)**
 
 ---
 
@@ -60,7 +61,7 @@ DebianTerm es software libre sin publicidad, sin telemetría y con código verif
 
 ---
 
-## 🚀 Características Principales (`v2.4.2`)
+## 🚀 Características Principales (`v2.5.0`)
 
 ### 1. Panel de Inicio y Verificación de Requerimientos Mínimos
 Al abrir la app se ejecuta automáticamente un diagnóstico (`SystemRequirements`) antes de instalar o iniciar Debian 12:
@@ -71,9 +72,9 @@ Al abrir la app se ejecuta automáticamente un diagnóstico (`SystemRequirements
 - **Inicio automático opcional**: interruptor (**"Entrar automáticamente a Debian 12 al iniciar"**) que respeta tu modo elegido (Terminal CLI o Modo Gráfico).
 
 ### 2. Modo Gráfico Híbrido antes de iniciar Debian 12 (XFCE4 / LXDE)
-- **Visor VNC Integrado (`RfbClient` + `VncCanvasView`)**: cliente RFB 3.8 puro en Java (`Raw`, `CopyRect`, `Zlib`, `DesktopSize`, portapapeles `ServerCutText`) conectado a `Xtigervnc` en `127.0.0.1:5901` **sin apps externas**. Incluye modos **Touchpad** y **Táctil directo**, pellizco-zoom, teclado X11 e intercambio rápido `>_ Term`.
-- **Soporte opcional `Termux:X11` (60 FPS)**: detección automática de `com.termux.x11` para lanzar `CmdEntryPoint :0 -ac` o acceso directo a su descarga oficial.
-- **Entornos y resoluciones:** **XFCE4 (Completo)** o **LXDE (Ligero)** en `1280x720`, `960x540` o `1600x900`.
+- **X11 Nativo Integrado (`libXlorie` 60 FPS — sin apps externas)**: incluye `libXlorie.so` (`arm64-v8a` y `armeabi-v7a`) empaquetado directamente en DebianTerm junto a `LorieView` y `CmdEntryPoint` puros en Java para renderizado acelerado EGL. Soporta orientación **Vertical / Horizontal / Auto**, botón rápido en vivo (`↕ Vert` / `↔ Horiz` / `⟳ Auto`) y modo pantalla completa **`Ajustar`** además de presets (`1280x720`, `960x540`, `1600x900`).
+- **Visor VNC Integrado (`RfbClient` + `VncCanvasView` + `Xtigervnc`)**: cliente RFB 3.8 puro en Java (`Raw`, `CopyRect`, `Zlib`, `DesktopSize`, portapapeles `ServerCutText`) conectado a `127.0.0.1:5901` como respaldo integrado con soporte **Vertical** y **`Ajustar`**, modos **Touchpad** y **Táctil directo**, pellizco-zoom, teclado X11 e intercambio rápido `>_ Term`.
+- **Instalador de escritorio en 1 toque**: instala **XFCE4 (Completo)** o **LXDE (Ligero)** con `xkb-data`, `dbus-x11` y TigerVNC.
 
 ### 3. Dos Caminos de Instalación y Ejecución Debian 12
 - **Camino 1 — Con Root (Chroot Nativo)**: detección segura de `/data/local/debian`, script `/data/local/bin/debian` con aislamiento `env -i`, montajes con `timeout 5`, contador `/dev/chroot_sessions` con desmontaje automático al cerrar la última sesión y subcomandos `status`, `stop`/`umount`, `exec`.
@@ -105,13 +106,14 @@ DebianTerm/
 │   └── ISSUE_TEMPLATE/          # Plantillas de bug y sugerencias
 ├── LICENSE                      # GNU GPL v3
 ├── src/
-│   ├── com/debianchroot/term/   # UI, Dashboard, Drawer, Chroot/PRoot, SAF, Backups, VNC y Sixel
+│   ├── com/debianchroot/term/   # UI, Dashboard, Drawer, Chroot/PRoot, SAF, Backups, VNC, X11 y Sixel
 │   ├── com/termux/terminal/     # Motor PTY con DECSET 2026, modo Pan y decodificador Sixel
-│   └── com/termux/view/         # Renderizador terminal con Sixel inline y gestos
+│   ├── com/termux/view/         # Renderizador terminal con Sixel inline y gestos
+│   └── com/termux/x11/          # Puente X11 Nativo Lorie (CmdEntryPoint, ICmdEntryInterface, LorieView, MainActivity)
 ├── libs/                        # Bibliotecas JAR (annotation-1.5.0, xz-1.9)
-├── jniLibs/                     # Binarios nativos arm64-v8a y armeabi-v7a
-├── tests/                       # Suite de 26 pruebas unitarias en JVM (VerifyAll.java)
-├── setup-deps.sh                # Descarga componentes base Termux, JARs y PRoot (SHA-256)
+├── jniLibs/                     # Binarios nativos arm64-v8a y armeabi-v7a (libtermux.so, libXlorie.so, PRoot)
+├── tests/                       # Suite de 29 pruebas unitarias en JVM (VerifyAll.java)
+├── setup-deps.sh                # Descarga componentes base Termux, JARs, libXlorie.so y PRoot (SHA-256)
 └── build.sh                     # Compilación completa (aapt2, javac, d8, zipalign, apksigner)
 ```
 
@@ -132,7 +134,7 @@ El APK firmado se genera en `build/DebianTerm-release.apk`.
 
 ## 🧪 Pruebas Unitarias
 
-La suite [VerifyAll.java](tests/VerifyAll.java) valida en JVM **26 pruebas clave** (`DECSET 2026`, modo Pan, redibujados sincronizados `>100 KB` y coalescencia de borrado, preservación de scroll `CSI 3 J` / 10,000 líneas, salida segura tras `exit` y sincronización de notificación Wake Lock, parser LXC/SHA-256, scripts `sh -n`, temas de color, requisitos, `TarExtractor`, PRoot, cierre suave, scripts gráficos XFCE4/LXDE, cliente RFB 3.8, sesiones, `setup-storage`, `PhantomProcessManager`, `TerminalSearch`, `SnippetManager`, `DebianDocumentsProvider`, `BackupManager` `.tar.gz`, Teclas Extra / Nerd Font TTF, `BootReceiver`, `SixelDecoder` y `TerminalEmulator` Sixel):
+La suite [VerifyAll.java](tests/VerifyAll.java) valida en JVM **29 pruebas clave** (`DECSET 2026`, modo Pan, redibujados sincronizados `>100 KB` y coalescencia de borrado, preservación de scroll `CSI 3 J` / 10,000 líneas, salida segura tras `exit` y sincronización de notificación Wake Lock, parser LXC/SHA-256, scripts `sh -n` y fallback `exec` Root, temas de color, requisitos, `TarExtractor`, PRoot, cierre suave, scripts gráficos XFCE4/LXDE, cliente RFB 3.8, sesiones, `setup-storage`, `PhantomProcessManager`, `TerminalSearch`, `SnippetManager`, `DebianDocumentsProvider`, `BackupManager` `.tar.gz`, Teclas Extra / Nerd Font TTF, `BootReceiver`, `SixelDecoder`, `TerminalEmulator` Sixel, contrato JNI/ELF X11 nativo integrado y orientación/resolución `Ajustar` para X11 y VNC):
 
 ```bash
 javac -encoding UTF-8 -cp build/classes:/opt/android-sdk/android.jar:libs/xz-1.9.jar -d build/test-classes tests/VerifyAll.java
@@ -146,4 +148,4 @@ java -cp build/test-classes:build/classes:/opt/android-sdk/android.jar:libs/xz-1
 - **Desarrollador:** Sergio Romero (**TeykerCol**) — [@thesergio9-spec](https://github.com/thesergio9-spec)
 - **Reportes de fallos y sugerencias:** Exclusivamente mediante **[GitHub Issues](https://github.com/thesergio9-spec/DebianTerm/issues)**.
 - **Apoyar el proyecto:** Si DebianTerm te resulta útil, puedes invitar un café en **[Ko-fi](https://ko-fi.com/teykercol)**.
-- **Licencia:** Distribuido bajo **GNU General Public License v3.0** ([LICENSE](LICENSE)), reutilizando componentes de código abierto de [Termux](https://github.com/termux/termux-app) (GPLv3) y [PRoot](https://github.com/termux/proot) (GPLv2+ / GPLv3).
+- **Licencia:** Distribuido bajo **GNU General Public License v3.0** ([LICENSE](LICENSE)), reutilizando componentes de código abierto de [Termux](https://github.com/termux/termux-app) (GPLv3), [Termux:X11](https://github.com/termux/termux-x11) (GPLv3) y [PRoot](https://github.com/termux/proot) (GPLv2+ / GPLv3).

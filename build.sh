@@ -15,10 +15,12 @@ for f in "$ANDROID_JAR" "$D8_JAR" "$ANNOTATION_JAR" "$XZ_JAR" \
          "$ROOT_DIR/jniLibs/arm64-v8a/libproot.so" \
          "$ROOT_DIR/jniLibs/arm64-v8a/libproot_loader.so" \
          "$ROOT_DIR/jniLibs/arm64-v8a/libproot_loader32.so" \
+         "$ROOT_DIR/jniLibs/arm64-v8a/libXlorie.so" \
          "$ROOT_DIR/jniLibs/armeabi-v7a/libtermux.so" \
          "$ROOT_DIR/jniLibs/armeabi-v7a/libproot.so" \
          "$ROOT_DIR/jniLibs/armeabi-v7a/libproot_loader.so" \
-         "$ROOT_DIR/jniLibs/armeabi-v7a/libproot_loader32.so"; do
+         "$ROOT_DIR/jniLibs/armeabi-v7a/libproot_loader32.so" \
+         "$ROOT_DIR/jniLibs/armeabi-v7a/libXlorie.so"; do
   if [ ! -f "$f" ]; then
     echo "ERROR: Falta dependencia requerida: $f (ejecuta ./setup-deps.sh primero)" >&2
     exit 1

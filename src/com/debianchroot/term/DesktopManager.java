@@ -17,6 +17,7 @@ public final class DesktopManager {
 
     public static final String BACKEND_VNC = "vnc";
     public static final String BACKEND_TERMUX_X11 = "x11";
+    public static final String BACKEND_NATIVE_X11 = BACKEND_TERMUX_X11;
 
     public static final String DESKTOP_XFCE = "xfce4";
     public static final String DESKTOP_LXDE = "lxde";
@@ -32,6 +33,7 @@ public final class DesktopManager {
     public static final String X11_DISPLAY = ":0";
 
     public static final class DesktopStatus {
+        public boolean builtInX11Available;
         public boolean termuxX11Installed;
         public String termuxX11Version = "";
         public String termuxX11ApkPath = "";
@@ -60,6 +62,12 @@ public final class DesktopManager {
 
     private DesktopManager() {}
 
+    public static boolean isBuiltInX11Available(Context context) {
+        if (context == null || context.getApplicationInfo() == null) return false;
+        String libDir = context.getApplicationInfo().nativeLibraryDir;
+        return libDir != null && new File(libDir, "libXlorie.so").exists();
+    }
+
     public static DesktopStatus inspectDesktopStatus(
         Context context,
         SystemRequirements.Report req,
@@ -67,18 +75,28 @@ public final class DesktopManager {
     ) {
         DesktopStatus status = new DesktopStatus();
 
-        // 1. Detect Termux:X11 Android app
-        try {
-            PackageManager pm = context.getPackageManager();
-            PackageInfo pi = pm.getPackageInfo(TERMUX_X11_PACKAGE, 0);
-            if (pi != null && pi.applicationInfo != null) {
-                status.termuxX11Installed = true;
-                status.termuxX11Version = pi.versionName != null ? pi.versionName : "instalado";
-                status.termuxX11ApkPath = pi.applicationInfo.sourceDir != null ? pi.applicationInfo.sourceDir : "";
-                status.termuxX11LibDir = pi.applicationInfo.nativeLibraryDir != null ? pi.applicationInfo.nativeLibraryDir : "";
+        // 1. Detect built-in X11 (libXlorie.so) or fallback external Termux:X11 app
+        status.builtInX11Available = isBuiltInX11Available(context);
+        if (status.builtInX11Available && context != null && context.getApplicationInfo() != null) {
+            status.termuxX11Installed = true;
+            status.termuxX11Version = "integrado";
+            status.termuxX11ApkPath = context.getApplicationInfo().sourceDir != null
+                ? context.getApplicationInfo().sourceDir : "";
+            status.termuxX11LibDir = context.getApplicationInfo().nativeLibraryDir != null
+                ? context.getApplicationInfo().nativeLibraryDir : "";
+        } else {
+            try {
+                PackageManager pm = context.getPackageManager();
+                PackageInfo pi = pm.getPackageInfo(TERMUX_X11_PACKAGE, 0);
+                if (pi != null && pi.applicationInfo != null) {
+                    status.termuxX11Installed = true;
+                    status.termuxX11Version = pi.versionName != null ? pi.versionName : "instalado";
+                    status.termuxX11ApkPath = pi.applicationInfo.sourceDir != null ? pi.applicationInfo.sourceDir : "";
+                    status.termuxX11LibDir = pi.applicationInfo.nativeLibraryDir != null ? pi.applicationInfo.nativeLibraryDir : "";
+                }
+            } catch (PackageManager.NameNotFoundException ignored) {
+            } catch (Exception ignored) {
             }
-        } catch (PackageManager.NameNotFoundException ignored) {
-        } catch (Exception ignored) {
         }
 
         // 2. Inspect Root Chroot desktop & VNC packages (fast single su probe)
@@ -146,7 +164,7 @@ public final class DesktopManager {
                 try {
                     int w = Integer.parseInt(parts[0].trim());
                     int h = Integer.parseInt(parts[1].trim());
-                    if (w >= 640 && w <= 3840 && h >= 480 && h <= 2160) {
+                    if (w >= 480 && w <= 3840 && h >= 480 && h <= 3840) {
                         return new int[] { w, h };
                     }
                 } catch (NumberFormatException ignored) {
@@ -154,6 +172,48 @@ public final class DesktopManager {
             }
         }
         return new int[] { 1280, 720 };
+    }
+
+    public static int[] computeFitResolution(int surfaceW, int surfaceH, boolean portrait) {
+        if (surfaceW <= 0 || surfaceH <= 0) {
+            return portrait ? new int[] { 720, 1280 } : new int[] { 1280, 720 };
+        }
+        int minSide = Math.min(surfaceW, surfaceH);
+        int maxSide = Math.max(surfaceW, surfaceH);
+        int shortSide = Math.max(480, Math.min(720, minSide));
+        int longSide = (int) Math.round(shortSide * (maxSide / (double) minSide));
+        longSide = Math.max(480, Math.min(2560, longSide));
+
+        int w = portrait ? shortSide : longSide;
+        int h = portrait ? longSide : shortSide;
+        w = Math.max(480, (w / 8) * 8);
+        h = Math.max(480, (h / 2) * 2);
+        return new int[] { w, h };
+    }
+
+    public static int[] resolveDesktopResolution(
+        String resSetting,
+        String orientationSetting,
+        int surfaceW,
+        int surfaceH
+    ) {
+        boolean wantPortrait;
+        if (TerminalSettings.GUI_ORIENTATION_PORTRAIT.equals(orientationSetting)) {
+            wantPortrait = true;
+        } else if (TerminalSettings.GUI_ORIENTATION_LANDSCAPE.equals(orientationSetting)) {
+            wantPortrait = false;
+        } else {
+            wantPortrait = (surfaceW <= 0 || surfaceH <= 0) || (surfaceW < surfaceH);
+        }
+
+        if (TerminalSettings.GUI_RESOLUTION_FIT.equals(resSetting)) {
+            return computeFitResolution(surfaceW, surfaceH, wantPortrait);
+        }
+
+        int[] base = parseResolution(resSetting);
+        int big = Math.max(base[0], base[1]);
+        int small = Math.min(base[0], base[1]);
+        return wantPortrait ? new int[] { small, big } : new int[] { big, small };
     }
 
     public static String generateDesktopInstallCommand(String desktopId) {
@@ -176,7 +236,7 @@ public final class DesktopManager {
             "apt-get install -y --no-install-recommends"
             + " -o Dpkg::Options::=\"--force-confdef\" -o Dpkg::Options::=\"--force-confold\" "
             + desktopPkgs
-            + " dbus-x11 tigervnc-standalone-server tigervnc-common x11-xserver-utils xfonts-base fonts-dejavu-core\n" +
+            + " dbus-x11 tigervnc-standalone-server tigervnc-common x11-xserver-utils xkb-data xfonts-base fonts-dejavu-core\n" +
             "if command -v dbus-uuidgen >/dev/null 2>&1; then\n" +
             "    mkdir -p /var/lib/dbus\n" +
             "    dbus-uuidgen --ensure=/etc/machine-id 2>/dev/null || true\n" +
@@ -204,8 +264,8 @@ public final class DesktopManager {
 
     public static String generateVncStartCommand(String desktopId, int width, int height) {
         String startBin = DESKTOP_LXDE.equals(desktopId) ? "startlxde" : "startxfce4";
-        int w = Math.max(640, Math.min(3840, width));
-        int h = Math.max(480, Math.min(2160, height));
+        int w = Math.max(480, Math.min(3840, width));
+        int h = Math.max(480, Math.min(3840, height));
 
         return "VNC_BIN=$(command -v Xtigervnc || command -v Xvnc || true)\n" +
             "if [ -z \"$VNC_BIN\" ]; then\n" +
@@ -285,33 +345,58 @@ public final class DesktopManager {
         String x11LibDir,
         String sharedTmpDir
     ) {
-        String qApk = ChrootManager.shellQuote(x11ApkPath);
-        String qLib = ChrootManager.shellQuote(x11LibDir != null ? x11LibDir : "");
-        String qTmp = ChrootManager.shellQuote(sharedTmpDir);
+        return generateBuiltInX11ServerCommand(x11ApkPath, x11LibDir, sharedTmpDir, null);
+    }
 
-        return "TMP_HOST=" + qTmp + "\n" +
-            "mkdir -p \"$TMP_HOST/.X11-unix\"\n" +
-            "chmod 1777 \"$TMP_HOST\" \"$TMP_HOST/.X11-unix\" 2>/dev/null || true\n" +
-            "rm -f \"$TMP_HOST/.X0-lock\" \"$TMP_HOST/.X11-unix/X0\" 2>/dev/null || true\n" +
-            "export TMPDIR=\"$TMP_HOST\"\n" +
-            "export XDG_RUNTIME_DIR=\"$TMP_HOST\"\n" +
-            "export CLASSPATH=" + qApk + "\n" +
-            "unset LD_LIBRARY_PATH LD_PRELOAD\n" +
-            "/system/bin/app_process -Xnoimage-dex2oat " +
-            (x11LibDir != null && !x11LibDir.isEmpty() ? ("-Djava.library.path=" + qLib + " ") : "") +
-            "/ --nice-name=\"termux-x11 com.termux.x11 :0\" com.termux.x11.CmdEntryPoint :0 -ac >\"$TMP_HOST/debianterm-x11.log\" 2>&1 &\n" +
-            "X11_PID=$!\n" +
-            "trap 'kill \"$X11_PID\" 2>/dev/null || true' EXIT HUP INT TERM\n" +
-            "i=0\n" +
-            "while [ $i -lt 50 ]; do\n" +
-            "    [ -S \"$TMP_HOST/.X11-unix/X0\" ] && break\n" +
-            "    i=$((i + 1))\n" +
-            "    sleep 0.1\n" +
-            "done\n" +
-            "if [ ! -S \"$TMP_HOST/.X11-unix/X0\" ]; then\n" +
-            "    echo 'Aviso: Termux:X11 aún no creó socket :0 (revisando log):'\n" +
-            "    tail -n 20 \"$TMP_HOST/debianterm-x11.log\" 2>/dev/null || true\n" +
-            "fi\n";
+    public static String generateBuiltInX11ServerCommand(
+        String appApkPath,
+        String nativeLibDir,
+        String sharedTmpDir,
+        String rootfsDir
+    ) {
+        String qApk = ChrootManager.shellQuote(appApkPath);
+        String qLib = ChrootManager.shellQuote(nativeLibDir != null ? nativeLibDir : "");
+        String qTmp = ChrootManager.shellQuote(sharedTmpDir);
+        String resolvedRoot = (rootfsDir != null && !rootfsDir.trim().isEmpty()) ? rootfsDir.trim() : "";
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("TMP_HOST=").append(qTmp).append('\n');
+        if (!resolvedRoot.isEmpty()) {
+            sb.append("ROOT_HOST=").append(ChrootManager.shellQuote(resolvedRoot)).append('\n');
+        } else {
+            sb.append("ROOT_HOST=$(dirname \"$TMP_HOST\")\n");
+        }
+        sb.append("mkdir -p \"$TMP_HOST/.X11-unix\"\n");
+        sb.append("chmod 1777 \"$TMP_HOST\" \"$TMP_HOST/.X11-unix\" 2>/dev/null || true\n");
+        sb.append("rm -f \"$TMP_HOST/.X0-lock\" \"$TMP_HOST/.X11-unix/X0\" 2>/dev/null || true\n");
+        sb.append("export TMPDIR=\"$TMP_HOST\"\n");
+        sb.append("export XDG_RUNTIME_DIR=\"$TMP_HOST\"\n");
+        sb.append("export XKB_CONFIG_ROOT=\"$ROOT_HOST/usr/share/X11/xkb\"\n");
+        sb.append("export XSTARTUP_LD_PRELOAD=none\n");
+        sb.append("export CLASSPATH=").append(qApk).append('\n');
+        sb.append("unset LD_LIBRARY_PATH LD_PRELOAD\n");
+        sb.append("echo '=== Iniciando servidor X11 Nativo (:0) ==='\n");
+        sb.append("/system/bin/app_process -Xnoimage-dex2oat ");
+        if (nativeLibDir != null && !nativeLibDir.isEmpty()) {
+            sb.append("-Djava.library.path=").append(qLib).append(' ');
+        }
+        sb.append("/ --nice-name=\"debianterm-x11 :0\" com.termux.x11.CmdEntryPoint :0 -ac >\"$TMP_HOST/debianterm-x11.log\" 2>&1 &\n");
+        sb.append("X11_PID=$!\n");
+        sb.append("trap 'kill \"$X11_PID\" 2>/dev/null || true' EXIT HUP INT TERM\n");
+        sb.append("i=0\n");
+        sb.append("while [ $i -lt 100 ]; do\n");
+        sb.append("    if ! kill -0 \"$X11_PID\" 2>/dev/null; then\n");
+        sb.append("        break\n");
+        sb.append("    fi\n");
+        sb.append("    [ -S \"$TMP_HOST/.X11-unix/X0\" ] && break\n");
+        sb.append("    i=$((i + 1))\n");
+        sb.append("    sleep 0.1\n");
+        sb.append("done\n");
+        sb.append("if [ ! -S \"$TMP_HOST/.X11-unix/X0\" ]; then\n");
+        sb.append("    echo 'Error: X11 Nativo no pudo abrir el socket :0. Registro:'\n");
+        sb.append("    tail -n 30 \"$TMP_HOST/debianterm-x11.log\" 2>/dev/null || true\n");
+        sb.append("fi\n");
+        return sb.toString();
     }
 
     public static void openTermuxX11Download(Context context) {

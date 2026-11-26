@@ -323,7 +323,15 @@ public final class SystemRequirements {
         PhantomProcessManager.Status phantomSt = PhantomProcessManager.inspect(context, report.hasRoot);
 
         List<CheckItem> fullItems = new ArrayList<>(report.items);
-        if (deskSt.termuxX11Installed) {
+        if (deskSt.builtInX11Available) {
+            fullItems.add(new CheckItem(
+                "gui",
+                "Modo Gráfico (Integrado)",
+                "X11 Nativo (60 FPS) + VNC",
+                "Motor X11 nativo (Lorie) y visor VNC integrados — sin apps externas",
+                Status.PASS
+            ));
+        } else if (deskSt.termuxX11Installed) {
             fullItems.add(new CheckItem(
                 "gui",
                 "Modo Gráfico (Híbrido)",

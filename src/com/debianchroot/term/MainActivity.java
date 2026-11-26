@@ -3,26 +3,34 @@ package com.debianchroot.term;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.ActivityNotFoundException;
+import android.content.BroadcastReceiver;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.ServiceConnection;
+import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
+import android.content.res.Configuration;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
 import android.os.IBinder;
+import android.os.Looper;
+import android.os.ParcelFileDescriptor;
 import android.provider.DocumentsContract;
 import android.provider.Settings;
 import android.text.Editable;
 import android.text.InputType;
 import android.text.TextUtils;
 import android.text.TextWatcher;
+import android.util.DisplayMetrics;
 import android.util.Log;
 import android.util.TypedValue;
 import android.view.ContextMenu;
@@ -31,6 +39,7 @@ import android.view.KeyEvent;
 import android.view.Menu;
 import android.view.MenuItem;
 import android.view.MotionEvent;
+import android.view.Surface;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
@@ -40,6 +49,7 @@ import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.FrameLayout;
+import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.RadioButton;
@@ -57,6 +67,9 @@ import com.termux.terminal.TerminalSession;
 import com.termux.terminal.TerminalSessionClient;
 import com.termux.view.TerminalView;
 import com.termux.view.TerminalViewClient;
+import com.termux.x11.CmdEntryPoint;
+import com.termux.x11.ICmdEntryInterface;
+import com.termux.x11.LorieView;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -136,12 +149,25 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
     private boolean mTextInputMode = false;
     private int mLastExtraRowHeightPx = 0;
 
-    // Integrated VNC Desktop controls
+    // Integrated VNC & Native X11 Desktop controls
     private VncCanvasView mVncCanvas;
+    private LorieView mLorieView;
     private LinearLayout mDesktopOverlay;
     private TextView mDesktopOverlayText;
     private TextView mDesktopTouchToggleBtn;
+    private TextView mDesktopOrientBtn;
     private RfbClient mRfbClient;
+    private ICmdEntryInterface mX11Service;
+    private boolean mActiveDesktopIsX11 = false;
+    private BroadcastReceiver mX11Receiver;
+    private final Handler mX11Handler = new Handler(Looper.getMainLooper());
+    private int mX11ConnectAttempt = 0;
+    private final Runnable mX11ConnectRunnable = new Runnable() {
+        @Override
+        public void run() {
+            stepX11Connect();
+        }
+    };
     private TerminalSession mActiveDesktopSession;
 
     // Dashboard controls
@@ -168,6 +194,10 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
     private RadioButton mDeskXfceRb;
     private RadioButton mDeskLxdeRb;
     private RadioGroup mResGroup;
+    private RadioGroup mOrientGroup;
+    private RadioButton mOrientAutoRb;
+    private RadioButton mOrientPortraitRb;
+    private RadioButton mOrientLandscapeRb;
     private TextView mGuiDesktopStatusTv;
     private Button mInstallDesktopBtn;
 
@@ -277,6 +307,8 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         applyExtraKeysMode(mSettings.getExtraKeysMode(), false);
         mExtraKeys.setHapticEnabled(mSettings.isHapticEnabled());
 
+        registerExportedX11Receiver();
+
         Intent svcIntent = new Intent(this, DebianTermService.class);
         bindService(svcIntent, mServiceConnection, Context.BIND_AUTO_CREATE);
     }
@@ -321,6 +353,26 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         if (mTerminalView != null && isTerminalVisible()) {
             mTerminalView.setTerminalCursorBlinkerRate(500);
             mTerminalView.setTerminalCursorBlinkerState(true, true);
+        }
+    }
+
+    @Override
+    public void onConfigurationChanged(Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        if (isDesktopVisible()) {
+            if (mActiveDesktopIsX11 && mLorieView != null) {
+                mLorieView.post(() -> {
+                    if (mLorieView != null && isDesktopVisible()) {
+                        mLorieView.triggerCallback();
+                    }
+                });
+            } else if (mVncCanvas != null) {
+                mVncCanvas.post(() -> {
+                    if (mVncCanvas != null) {
+                        mVncCanvas.resetZoom();
+                    }
+                });
+            }
         }
     }
 
@@ -384,7 +436,8 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
 
     @Override
     protected void onDestroy() {
-        disconnectRfbClient();
+        disconnectDesktopBackends();
+        unregisterX11Receiver();
         if (mBound) {
             unbindService(mServiceConnection);
             mBound = false;
@@ -456,8 +509,25 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         showDashboardView(true);
     }
 
+    private void applyDesktopOrientationPreference() {
+        String orient = mSettings.getGuiOrientation();
+        if (TerminalSettings.GUI_ORIENTATION_PORTRAIT.equals(orient)) {
+            setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
+        } else if (TerminalSettings.GUI_ORIENTATION_LANDSCAPE.equals(orient)) {
+            setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
+        } else {
+            setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
+        }
+        updateDesktopOrientButton();
+    }
+
+    private void restoreDefaultOrientation() {
+        setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
+    }
+
     private void showDashboardView(boolean triggerCheck) {
         hideSoftKeyboard();
+        restoreDefaultOrientation();
         if (mDrawerLayout != null && mDrawerLayout.isDrawerOpen()) {
             mDrawerLayout.closeDrawer();
         }
@@ -479,6 +549,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
     }
 
     private void showTerminalView() {
+        restoreDefaultOrientation();
         if (mDashboardView != null) mDashboardView.setVisibility(View.GONE);
         if (mDesktopView != null) mDesktopView.setVisibility(View.GONE);
         if (mDrawerLayout != null) mDrawerLayout.setVisibility(View.VISIBLE);
@@ -497,11 +568,18 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         }
         if (mTerminalView != null) mTerminalView.setTerminalCursorBlinkerState(false, true);
         if (mDesktopView != null) mDesktopView.setVisibility(View.VISIBLE);
-        if (mVncCanvas != null) mVncCanvas.requestFocus();
+        applyDesktopOrientationPreference();
+        if (mActiveDesktopIsX11 && mLorieView != null) {
+            mLorieView.requestFocus();
+            mLorieView.sendSurface();
+            mLorieView.triggerCallback();
+        } else if (mVncCanvas != null) {
+            mVncCanvas.requestFocus();
+        }
     }
 
     // -------------------------------------------------------------------------
-    // Integrated VNC Desktop View UI
+    // Integrated VNC & Native X11 Desktop View UI
     // -------------------------------------------------------------------------
 
     private LinearLayout buildDesktopView() {
@@ -515,17 +593,33 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         bar.setBackgroundColor(Color.parseColor("#161B22"));
         bar.setPadding(dp(4), dp(2), dp(4), dp(2));
 
-        bar.addView(makeDesktopBarButton("⌂ Inicio", "#21262D", v -> showDashboardView()));
-        bar.addView(makeDesktopBarButton(">_ Term", "#21262D", v -> showTerminalView()));
-        mDesktopTouchToggleBtn = makeDesktopBarButton("🖱 Touch", "#1F6FEB", v -> toggleDesktopPointerMode());
-        bar.addView(mDesktopTouchToggleBtn);
-        bar.addView(makeDesktopBarButton("Clic Der.", "#21262D", v -> {
-            if (mVncCanvas != null) mVncCanvas.sendRightClickAtCursor();
-        }));
-        bar.addView(makeDesktopBarButton("⌨", "#21262D", v -> toggleDesktopKeyboard()));
+        HorizontalScrollView actionsScroll = new HorizontalScrollView(this);
+        actionsScroll.setHorizontalScrollBarEnabled(false);
 
-        View spacer = new View(this);
-        bar.addView(spacer, new LinearLayout.LayoutParams(0, 1, 1f));
+        LinearLayout actionsRow = new LinearLayout(this);
+        actionsRow.setOrientation(LinearLayout.HORIZONTAL);
+        actionsRow.setGravity(Gravity.CENTER_VERTICAL);
+
+        actionsRow.addView(makeDesktopBarButton("⌂ Inicio", "#21262D", v -> showDashboardView()));
+        actionsRow.addView(makeDesktopBarButton(">_ Term", "#21262D", v -> showTerminalView()));
+        mDesktopTouchToggleBtn = makeDesktopBarButton("🖱 Touch", "#1F6FEB", v -> toggleDesktopPointerMode());
+        actionsRow.addView(mDesktopTouchToggleBtn);
+        mDesktopOrientBtn = makeDesktopBarButton("⟳ Auto", "#21262D", v -> cycleDesktopOrientation());
+        actionsRow.addView(mDesktopOrientBtn);
+        updateDesktopOrientButton();
+        actionsRow.addView(makeDesktopBarButton("Clic Der.", "#21262D", v -> {
+            if (mActiveDesktopIsX11 && mLorieView != null) {
+                mLorieView.sendRightClickAtCursor();
+            } else if (mVncCanvas != null) {
+                mVncCanvas.sendRightClickAtCursor();
+            }
+        }));
+        actionsRow.addView(makeDesktopBarButton("⌨", "#21262D", v -> toggleDesktopKeyboard()));
+
+        actionsScroll.addView(actionsRow, new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        bar.addView(actionsScroll, new LinearLayout.LayoutParams(
+            0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
         bar.addView(makeDesktopBarButton("✕ Detener", "#B62324", v -> stopActiveDesktop()));
         root.addView(bar, new LinearLayout.LayoutParams(
@@ -534,6 +628,44 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         FrameLayout canvasWrap = new FrameLayout(this);
         mVncCanvas = new VncCanvasView(this);
         canvasWrap.addView(mVncCanvas, new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        mLorieView = new LorieView(this, new com.termux.x11.MainActivity.BridgeCallbacks() {
+            @Override
+            public void onWindowSurfaceChanged(Surface surface) {
+                if (mActiveDesktopIsX11 && mX11Service != null) {
+                    try {
+                        mX11Service.windowChanged(surface);
+                    } catch (Exception ignored) {
+                    }
+                }
+            }
+
+            @Override
+            public void onCursorSurfaceChanged(Surface surface) {
+                if (mActiveDesktopIsX11 && mX11Service != null) {
+                    try {
+                        mX11Service.cursorWindowChanged(surface);
+                    } catch (Exception ignored) {
+                    }
+                }
+            }
+
+            @Override
+            public void onClientConnectedStateChanged() {
+                if (mActiveDesktopIsX11 && mLorieView != null && !mLorieView.connected() && isDesktopVisible()) {
+                    mDesktopOverlay.setVisibility(View.VISIBLE);
+                    mDesktopOverlayText.setText("Sesión X11 finalizada");
+                }
+            }
+
+            @Override
+            public void onSoftKeyboardRequested(boolean toggle) {
+                toggleDesktopKeyboard();
+            }
+        });
+        mLorieView.setVisibility(View.GONE);
+        canvasWrap.addView(mLorieView, new FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         mDesktopOverlay = new LinearLayout(this);
@@ -546,7 +678,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         mDesktopOverlay.addView(pb);
 
         mDesktopOverlayText = new TextView(this);
-        mDesktopOverlayText.setText("Conectando al escritorio Debian 12 (VNC :1)...");
+        mDesktopOverlayText.setText("Conectando al escritorio Debian 12...");
         mDesktopOverlayText.setTextColor(Color.parseColor("#E6EDF3"));
         mDesktopOverlayText.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
         mDesktopOverlayText.setGravity(Gravity.CENTER);
@@ -582,21 +714,90 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         return tv;
     }
 
+    private void updateTouchToggleButton(boolean touchpad) {
+        if (mDesktopTouchToggleBtn == null) return;
+        mDesktopTouchToggleBtn.setText(touchpad ? "🖱 Touch" : "👆 Táctil");
+        mDesktopTouchToggleBtn.setBackground(makePillBg(touchpad ? "#1F6FEB" : "#238636"));
+    }
+
     private void toggleDesktopPointerMode() {
-        if (mVncCanvas == null || mDesktopTouchToggleBtn == null) return;
-        boolean nextTouchpad = !mVncCanvas.isTouchpadMode();
-        mVncCanvas.setTouchpadMode(nextTouchpad);
-        mDesktopTouchToggleBtn.setText(nextTouchpad ? "🖱 Touch" : "👆 Táctil");
-        mDesktopTouchToggleBtn.setBackground(makePillBg(nextTouchpad ? "#1F6FEB" : "#238636"));
+        if (mDesktopTouchToggleBtn == null) return;
+        boolean nextTouchpad;
+        if (mActiveDesktopIsX11 && mLorieView != null) {
+            nextTouchpad = !mLorieView.isTouchpadMode();
+            mLorieView.setTouchpadMode(nextTouchpad);
+        } else if (mVncCanvas != null) {
+            nextTouchpad = !mVncCanvas.isTouchpadMode();
+            mVncCanvas.setTouchpadMode(nextTouchpad);
+        } else {
+            return;
+        }
+        updateTouchToggleButton(nextTouchpad);
         Toast.makeText(this,
             nextTouchpad ? "Modo Touchpad (arrastra cursor, 2 dedos clic der./scroll)"
                          : "Modo Táctil directo (toca y arrastra directo en pantalla)",
             Toast.LENGTH_SHORT).show();
     }
 
+    private void updateDesktopOrientButton() {
+        if (mDesktopOrientBtn == null) return;
+        String orient = mSettings.getGuiOrientation();
+        if (TerminalSettings.GUI_ORIENTATION_PORTRAIT.equals(orient)) {
+            mDesktopOrientBtn.setText("↕ Vert");
+            mDesktopOrientBtn.setBackground(makePillBg("#1F6FEB"));
+        } else if (TerminalSettings.GUI_ORIENTATION_LANDSCAPE.equals(orient)) {
+            mDesktopOrientBtn.setText("↔ Horiz");
+            mDesktopOrientBtn.setBackground(makePillBg("#8957E5"));
+        } else {
+            mDesktopOrientBtn.setText("⟳ Auto");
+            mDesktopOrientBtn.setBackground(makePillBg("#21262D"));
+        }
+    }
+
+    private void syncGuiOrientationRadios() {
+        if (mOrientGroup == null) return;
+        String orient = mSettings.getGuiOrientation();
+        if (TerminalSettings.GUI_ORIENTATION_PORTRAIT.equals(orient)) {
+            if (mOrientPortraitRb != null) mOrientPortraitRb.setChecked(true);
+        } else if (TerminalSettings.GUI_ORIENTATION_LANDSCAPE.equals(orient)) {
+            if (mOrientLandscapeRb != null) mOrientLandscapeRb.setChecked(true);
+        } else {
+            if (mOrientAutoRb != null) mOrientAutoRb.setChecked(true);
+        }
+    }
+
+    private void cycleDesktopOrientation() {
+        String cur = mSettings.getGuiOrientation();
+        String next;
+        if (TerminalSettings.GUI_ORIENTATION_AUTO.equals(cur)) {
+            next = TerminalSettings.GUI_ORIENTATION_PORTRAIT;
+        } else if (TerminalSettings.GUI_ORIENTATION_PORTRAIT.equals(cur)) {
+            next = TerminalSettings.GUI_ORIENTATION_LANDSCAPE;
+        } else {
+            next = TerminalSettings.GUI_ORIENTATION_AUTO;
+        }
+        mSettings.setGuiOrientation(next);
+        applyDesktopOrientationPreference();
+        syncGuiOrientationRadios();
+
+        String label;
+        if (TerminalSettings.GUI_ORIENTATION_PORTRAIT.equals(next)) {
+            label = "Orientación fijada en Vertical";
+        } else if (TerminalSettings.GUI_ORIENTATION_LANDSCAPE.equals(next)) {
+            label = "Orientación fijada en Horizontal";
+        } else {
+            label = "Orientación Automática (sensor)";
+        }
+        if (!mActiveDesktopIsX11) {
+            label += " (en VNC reinicia el escritorio para aplicar geometría)";
+        }
+        Toast.makeText(this, label, Toast.LENGTH_SHORT).show();
+    }
+
     private void toggleDesktopKeyboard() {
-        if (mVncCanvas == null) return;
-        mVncCanvas.requestFocus();
+        View target = (mActiveDesktopIsX11 && mLorieView != null) ? mLorieView : mVncCanvas;
+        if (target == null) return;
+        target.requestFocus();
         InputMethodManager imm = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
         if (imm != null) {
             imm.toggleSoftInput(InputMethodManager.SHOW_FORCED, 0);
@@ -934,20 +1135,20 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
 
         RadioGroup backendGroup = new RadioGroup(this);
         backendGroup.setOrientation(LinearLayout.HORIZONTAL);
+        mBackendX11Rb = new RadioButton(this);
+        mBackendX11Rb.setText("⚡ X11 Nativo (60 FPS)");
+        mBackendX11Rb.setTextColor(Color.parseColor("#E6EDF3"));
+        mBackendX11Rb.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        mBackendX11Rb.setId(View.generateViewId());
+
         mBackendVncRb = new RadioButton(this);
         mBackendVncRb.setText("Visor VNC Integrado");
         mBackendVncRb.setTextColor(Color.parseColor("#E6EDF3"));
         mBackendVncRb.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
         mBackendVncRb.setId(View.generateViewId());
 
-        mBackendX11Rb = new RadioButton(this);
-        mBackendX11Rb.setText("Termux:X11 (60 FPS)");
-        mBackendX11Rb.setTextColor(Color.parseColor("#E6EDF3"));
-        mBackendX11Rb.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
-        mBackendX11Rb.setId(View.generateViewId());
-
-        backendGroup.addView(mBackendVncRb);
         backendGroup.addView(mBackendX11Rb);
+        backendGroup.addView(mBackendVncRb);
         if (DesktopManager.BACKEND_TERMUX_X11.equals(mSettings.getGuiBackend())) {
             mBackendX11Rb.setChecked(true);
         } else {
@@ -963,7 +1164,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         });
         card.addView(backendGroup);
 
-        // Termux:X11 detection & download recommendation notice
+        // Built-in X11 status notice (with optional external download fallback only if library missing)
         mX11NoticeBox = new LinearLayout(this);
         mX11NoticeBox.setOrientation(LinearLayout.VERTICAL);
         mX11NoticeBox.setBackground(makeRoundedBg("#0D1117", "#30363D", 6));
@@ -974,7 +1175,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         mX11NoticeBox.setLayoutParams(noticeLp);
 
         mX11NoticeText = new TextView(this);
-        mX11NoticeText.setText("Comprobando si Termux:X11 está instalado...");
+        mX11NoticeText.setText("Comprobando motor gráfico X11 Nativo integrado...");
         mX11NoticeText.setTextColor(Color.parseColor("#8B949E"));
         mX11NoticeText.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
         mX11NoticeBox.addView(mX11NoticeText);
@@ -982,6 +1183,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         mX11DownloadBtn = makeActionButton("⬇ Descargar Termux:X11 APK (GitHub)", "#1F6FEB", v ->
             DesktopManager.openTermuxX11Download(MainActivity.this));
         mX11DownloadBtn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        mX11DownloadBtn.setVisibility(View.GONE);
         LinearLayout.LayoutParams dlLp = new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         dlLp.setMargins(0, dp(6), 0, 0);
@@ -990,7 +1192,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
 
         // Desktop environment + Resolution
         TextView deskLbl = new TextView(this);
-        deskLbl.setText("Escritorio y Resolución VNC:");
+        deskLbl.setText("Escritorio y Resolución:");
         deskLbl.setTextColor(Color.parseColor("#C9D1D9"));
         deskLbl.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
         deskLbl.setTypeface(Typeface.DEFAULT_BOLD);
@@ -1028,12 +1230,15 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         });
         card.addView(deskGroup);
 
+        HorizontalScrollView resScroll = new HorizontalScrollView(this);
+        resScroll.setHorizontalScrollBarEnabled(false);
+
         mResGroup = new RadioGroup(this);
         mResGroup.setOrientation(LinearLayout.HORIZONTAL);
         String curRes = mSettings.getGuiResolution();
         for (final String resOpt : TerminalSettings.ALL_GUI_RESOLUTIONS) {
             RadioButton rb = new RadioButton(this);
-            rb.setText(resOpt);
+            rb.setText(TerminalSettings.getGuiResolutionDisplayLabel(resOpt));
             rb.setTextColor(Color.parseColor("#C9D1D9"));
             rb.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
             rb.setId(View.generateViewId());
@@ -1043,7 +1248,58 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
             }
             rb.setOnClickListener(v -> mSettings.setGuiResolution(resOpt));
         }
-        card.addView(mResGroup);
+        resScroll.addView(mResGroup, new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        card.addView(resScroll, new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        TextView orientLbl = new TextView(this);
+        orientLbl.setText("Orientación de pantalla:");
+        orientLbl.setTextColor(Color.parseColor("#C9D1D9"));
+        orientLbl.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        orientLbl.setTypeface(Typeface.DEFAULT_BOLD);
+        orientLbl.setPadding(0, dp(4), 0, dp(2));
+        card.addView(orientLbl);
+
+        mOrientGroup = new RadioGroup(this);
+        mOrientGroup.setOrientation(LinearLayout.HORIZONTAL);
+
+        mOrientAutoRb = new RadioButton(this);
+        mOrientAutoRb.setText("Auto");
+        mOrientAutoRb.setTextColor(Color.parseColor("#C9D1D9"));
+        mOrientAutoRb.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
+        mOrientAutoRb.setId(View.generateViewId());
+
+        mOrientPortraitRb = new RadioButton(this);
+        mOrientPortraitRb.setText("Vertical");
+        mOrientPortraitRb.setTextColor(Color.parseColor("#C9D1D9"));
+        mOrientPortraitRb.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
+        mOrientPortraitRb.setId(View.generateViewId());
+
+        mOrientLandscapeRb = new RadioButton(this);
+        mOrientLandscapeRb.setText("Horizontal");
+        mOrientLandscapeRb.setTextColor(Color.parseColor("#C9D1D9"));
+        mOrientLandscapeRb.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
+        mOrientLandscapeRb.setId(View.generateViewId());
+
+        mOrientGroup.addView(mOrientAutoRb);
+        mOrientGroup.addView(mOrientPortraitRb);
+        mOrientGroup.addView(mOrientLandscapeRb);
+        syncGuiOrientationRadios();
+
+        mOrientAutoRb.setOnClickListener(v -> {
+            mSettings.setGuiOrientation(TerminalSettings.GUI_ORIENTATION_AUTO);
+            updateDesktopOrientButton();
+        });
+        mOrientPortraitRb.setOnClickListener(v -> {
+            mSettings.setGuiOrientation(TerminalSettings.GUI_ORIENTATION_PORTRAIT);
+            updateDesktopOrientButton();
+        });
+        mOrientLandscapeRb.setOnClickListener(v -> {
+            mSettings.setGuiOrientation(TerminalSettings.GUI_ORIENTATION_LANDSCAPE);
+            updateDesktopOrientButton();
+        });
+        card.addView(mOrientGroup);
 
         mGuiDesktopStatusTv = new TextView(this);
         mGuiDesktopStatusTv.setText("Estado escritorio: comprobando...");
@@ -1697,11 +1953,15 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         }
 
         if (DesktopManager.BACKEND_TERMUX_X11.equals(backend)) {
+            if (ds.builtInX11Available) {
+                openX11DesktopSession(isRootMode);
+                return;
+            }
             if (!ds.termuxX11Installed) {
                 new AlertDialog.Builder(this)
                     .setTitle("Termux:X11 no está instalado")
-                    .setMessage("No se encontró la app Termux:X11 en este dispositivo.\n\n"
-                        + "Puedes descargar e instalar su APK para máxima fluidez (60 FPS) o iniciar ahora mismo con el Visor VNC Integrado de DebianTerm.")
+                    .setMessage("No se encontró el motor X11 integrado ni la app Termux:X11 en este dispositivo.\n\n"
+                        + "Puedes usar el Visor VNC Integrado ahora mismo o descargar Termux:X11 APK.")
                     .setPositiveButton("⬇ Descargar Termux:X11 APK", (d, w) ->
                         DesktopManager.openTermuxX11Download(MainActivity.this))
                     .setNeutralButton("Usar Visor VNC Integrado ahora", (d, w) -> {
@@ -1737,15 +1997,44 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         updateDashboardResumeBar();
     }
 
+    private int[] resolveConfiguredDesktopSize() {
+        String resSetting = mSettings.getGuiResolution();
+        String orientSetting = mSettings.getGuiOrientation();
+        DisplayMetrics dm = getResources().getDisplayMetrics();
+        int shortSide = Math.min(dm.widthPixels, dm.heightPixels);
+        int longSide = Math.max(dm.widthPixels, dm.heightPixels);
+
+        boolean wantPortrait;
+        if (TerminalSettings.GUI_ORIENTATION_PORTRAIT.equals(orientSetting)) {
+            wantPortrait = true;
+        } else if (TerminalSettings.GUI_ORIENTATION_LANDSCAPE.equals(orientSetting)) {
+            wantPortrait = false;
+        } else {
+            wantPortrait = dm.widthPixels <= dm.heightPixels;
+        }
+
+        int barReserve = dp(64);
+        int surfaceW = wantPortrait ? shortSide : longSide;
+        int surfaceH = wantPortrait ? Math.max(480, longSide - barReserve) : Math.max(480, shortSide - barReserve);
+        return DesktopManager.resolveDesktopResolution(resSetting, orientSetting, surfaceW, surfaceH);
+    }
+
     private void openVncDesktopSession(boolean isRootMode) {
         if (mService == null) return;
         mSettings.setInstallMode(isRootMode ? TerminalSettings.MODE_ROOT : TerminalSettings.MODE_PROOT);
-        disconnectRfbClient();
+        disconnectDesktopBackends();
         if (mActiveDesktopSession != null && mService.hasSession(mActiveDesktopSession)) {
             mService.removeSession(mActiveDesktopSession);
         }
+        mActiveDesktopIsX11 = false;
+        if (mLorieView != null) mLorieView.setVisibility(View.GONE);
+        if (mVncCanvas != null) {
+            mVncCanvas.setVisibility(View.VISIBLE);
+            mVncCanvas.setTouchpadMode(true);
+        }
+        updateTouchToggleButton(true);
 
-        int[] res = DesktopManager.parseResolution(mSettings.getGuiResolution());
+        int[] res = resolveConfiguredDesktopSize();
         TerminalSession deskSession = mService.createDesktopVncSession(
             isRootMode,
             mSettings.getChrootPath(),
@@ -1757,6 +2046,9 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         );
         mActiveDesktopSession = deskSession;
         requestNotificationsPermissionIfNeeded(false);
+        if (deskSession.getEmulator() == null) {
+            deskSession.initializeEmulator(80, 24, 16, 32);
+        }
         switchToSession(deskSession);
         showDesktopView();
         mDesktopOverlay.setVisibility(View.VISIBLE);
@@ -1819,33 +2111,160 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
     private void openX11DesktopSession(boolean isRootMode) {
         if (mService == null) return;
         mSettings.setInstallMode(isRootMode ? TerminalSettings.MODE_ROOT : TerminalSettings.MODE_PROOT);
+        DesktopManager.DesktopStatus ds = mLastReport.desktopStatus;
+        if (ds == null || !ds.builtInX11Available) {
+            TerminalSession deskSession = mService.createDesktopX11Session(
+                isRootMode, mSettings.getChrootPath(), mSettings.getEntryScriptPath(),
+                mSettings.getDesktopEnv(), ds, this);
+            requestNotificationsPermissionIfNeeded(false);
+            switchToSession(deskSession);
+            showTerminalView();
+            refreshDrawerSessions();
+            updateDashboardResumeBar();
+            updateWakeLockUi();
+            DesktopManager.launchTermuxX11App(MainActivity.this);
+            return;
+        }
+
+        disconnectDesktopBackends();
+        if (mActiveDesktopSession != null && mService.hasSession(mActiveDesktopSession)) {
+            mService.removeSession(mActiveDesktopSession);
+        }
+
+        int[] res = resolveConfiguredDesktopSize();
+        boolean fitToScreen = TerminalSettings.GUI_RESOLUTION_FIT.equals(mSettings.getGuiResolution());
+        mActiveDesktopIsX11 = true;
+        if (mVncCanvas != null) mVncCanvas.setVisibility(View.GONE);
+        if (mLorieView != null) {
+            mLorieView.setVisibility(View.VISIBLE);
+            if (fitToScreen) {
+                mLorieView.setFitToScreen(true);
+            } else {
+                mLorieView.setTargetResolution(res[0], res[1]);
+            }
+            mLorieView.setTouchpadMode(true);
+        }
+        updateTouchToggleButton(true);
+
         TerminalSession deskSession = mService.createDesktopX11Session(
             isRootMode,
             mSettings.getChrootPath(),
             mSettings.getEntryScriptPath(),
             mSettings.getDesktopEnv(),
-            mLastReport.desktopStatus,
+            ds,
             this
         );
+        mActiveDesktopSession = deskSession;
         requestNotificationsPermissionIfNeeded(false);
+        if (deskSession.getEmulator() == null) {
+            deskSession.initializeEmulator(80, 24, 16, 32);
+        }
         switchToSession(deskSession);
-        showTerminalView();
+        showDesktopView();
+        mDesktopOverlay.setVisibility(View.VISIBLE);
+        mDesktopOverlayText.setText("Iniciando "
+            + (DesktopManager.DESKTOP_LXDE.equals(mSettings.getDesktopEnv()) ? "LXDE" : "XFCE4")
+            + " (" + (fitToScreen ? "Ajustar • " : "") + res[0] + "×" + res[1] + ") en X11 Nativo (60 FPS)...");
+
+        scheduleX11Connect(0);
         refreshDrawerSessions();
         updateDashboardResumeBar();
         updateWakeLockUi();
+    }
 
-        Toast.makeText(this, "Iniciando servidor Termux:X11 y escritorio Debian 12...", Toast.LENGTH_SHORT).show();
-        mRootFrame.postDelayed(() -> {
-            if (!DesktopManager.launchTermuxX11App(MainActivity.this)) {
-                Toast.makeText(MainActivity.this,
-                    "Abre la app Termux:X11 manualmente si no saltó al frente.",
-                    Toast.LENGTH_LONG).show();
+    private void registerExportedX11Receiver() {
+        if (mX11Receiver != null) return;
+        mX11Receiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                if (intent == null || !CmdEntryPoint.ACTION_START.equals(intent.getAction())) return;
+                Bundle bundle = intent.getBundleExtra(null);
+                if (bundle == null) return;
+                IBinder binder = bundle.getBinder(null);
+                if (binder == null) return;
+                mX11Service = ICmdEntryInterface.Stub.asInterface(binder);
+                if (mActiveDesktopIsX11) {
+                    connectLorieToService();
+                }
             }
-        }, 900L);
+        };
+        IntentFilter filter = new IntentFilter(CmdEntryPoint.ACTION_START);
+        if (Build.VERSION.SDK_INT >= 33) {
+            try {
+                Context.class.getMethod("registerReceiver", BroadcastReceiver.class, IntentFilter.class, int.class)
+                    .invoke(this, mX11Receiver, filter, 0x2); // Context.RECEIVER_EXPORTED
+                return;
+            } catch (Exception ignored) {
+            }
+        }
+        registerReceiver(mX11Receiver, filter);
+    }
+
+    private void unregisterX11Receiver() {
+        if (mX11Receiver == null) return;
+        try {
+            unregisterReceiver(mX11Receiver);
+        } catch (IllegalArgumentException ignored) {
+        }
+        mX11Receiver = null;
+    }
+
+    private void scheduleX11Connect(int attempt) {
+        mX11Handler.removeCallbacks(mX11ConnectRunnable);
+        mX11ConnectAttempt = attempt;
+        mX11Handler.postDelayed(mX11ConnectRunnable, attempt == 0 ? 150L : 250L);
+    }
+
+    private void stepX11Connect() {
+        if (!mActiveDesktopIsX11 || mLorieView == null || mExitingApp) return;
+        if (mLorieView.connected()) {
+            mDesktopOverlay.setVisibility(View.GONE);
+            return;
+        }
+        if (mX11Service != null) {
+            connectLorieToService();
+            if (mLorieView.connected()) return;
+        } else {
+            mLorieView.requestConnection();
+        }
+        if (mX11ConnectAttempt < 60) {
+            scheduleX11Connect(mX11ConnectAttempt + 1);
+        } else if (isDesktopVisible()) {
+            mDesktopOverlay.setVisibility(View.VISIBLE);
+            mDesktopOverlayText.setText("No se pudo conectar con X11 Nativo (:0).\nPulsa 'Ver consola del servidor' para revisar el registro.");
+        }
+    }
+
+    private void connectLorieToService() {
+        if (!mActiveDesktopIsX11 || mLorieView == null || mX11Service == null) return;
+        if (mLorieView.connected()) {
+            mDesktopOverlay.setVisibility(View.GONE);
+            return;
+        }
+        try {
+            ParcelFileDescriptor xConn = mX11Service.getXConnection();
+            if (xConn != null) {
+                mLorieView.connect(xConn.detachFd());
+                try {
+                    ParcelFileDescriptor logcatFd = mX11Service.getLogcatOutput();
+                    if (logcatFd != null) {
+                        mLorieView.startLogcat(logcatFd.detachFd());
+                    }
+                } catch (Exception ignored) {
+                }
+                mLorieView.sendSurface();
+                mLorieView.triggerCallback();
+                mX11Handler.removeCallbacks(mX11ConnectRunnable);
+                mDesktopOverlay.setVisibility(View.GONE);
+            }
+        } catch (Exception e) {
+            Log.w(LOG_TAG, "X11 service connection attempt failed", e);
+            mX11Service = null;
+        }
     }
 
     private void stopActiveDesktop() {
-        disconnectRfbClient();
+        disconnectDesktopBackends();
         if (mService != null && mActiveDesktopSession != null) {
             mService.removeSession(mActiveDesktopSession);
             if (mCurrentSession == mActiveDesktopSession) {
@@ -1859,6 +2278,21 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         mActiveDesktopSession = null;
         showDashboardView();
         refreshDrawerSessions();
+    }
+
+    private void disconnectDesktopBackends() {
+        disconnectRfbClient();
+        disconnectX11Client();
+    }
+
+    private void disconnectX11Client() {
+        mActiveDesktopIsX11 = false;
+        mX11Handler.removeCallbacks(mX11ConnectRunnable);
+        mX11Service = null;
+        if (mLorieView != null) {
+            mLorieView.connect(-1);
+            mLorieView.setVisibility(View.GONE);
+        }
     }
 
     private void disconnectRfbClient() {
@@ -2124,7 +2558,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         if (mService == null || session == null) return;
         DebianTermService.SessionKind closedKind = mService.getSessionKind(session);
         if (session == mActiveDesktopSession) {
-            disconnectRfbClient();
+            disconnectDesktopBackends();
             mActiveDesktopSession = null;
         }
         boolean wasCurrent = (session == mCurrentSession);
@@ -2153,7 +2587,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         if (mExitingApp) return;
         mExitingApp = true;
         hideSoftKeyboard();
-        disconnectRfbClient();
+        disconnectDesktopBackends();
         mActiveDesktopSession = null;
         mCurrentSession = null;
         if (mTerminalView != null) {
@@ -2321,18 +2755,23 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
             mDashPhantomFixBtn.setVisibility(showPhantom ? View.VISIBLE : View.GONE);
         }
 
-        // 3. Graphical Mode Card update (Termux:X11 detection & recommendation)
+        // 3. Graphical Mode Card update (built-in X11 + VNC notice)
         DesktopManager.DesktopStatus ds = r.desktopStatus;
         if (mX11NoticeBox != null && mX11NoticeText != null && mX11DownloadBtn != null) {
-            if (ds.termuxX11Installed) {
+            if (ds.builtInX11Available) {
+                mX11NoticeBox.setBackground(makeRoundedBg("#0D1117", "#238636", 6));
+                mX11NoticeText.setText("✓ Motor X11 Nativo (Lorie 60 FPS) integrado — Sin instalar apps externas ni límite de CPU en segundo plano.");
+                mX11NoticeText.setTextColor(Color.parseColor("#3FB950"));
+                mX11DownloadBtn.setVisibility(View.GONE);
+            } else if (ds.termuxX11Installed) {
                 mX11NoticeBox.setBackground(makeRoundedBg("#0D1117", "#238636", 6));
                 mX11NoticeText.setText("✓ Termux:X11 v" + ds.termuxX11Version
-                    + " detectado — Puedes elegir Visor VNC Integrado o Termux:X11 (60 FPS).");
+                    + " detectado — Puedes elegir Visor VNC Integrado o X11 (60 FPS).");
                 mX11NoticeText.setTextColor(Color.parseColor("#3FB950"));
                 mX11DownloadBtn.setVisibility(View.GONE);
             } else {
                 mX11NoticeBox.setBackground(makeRoundedBg("#0D1117", "#1F6FEB", 6));
-                mX11NoticeText.setText("ℹ Termux:X11 no está instalado. Puedes usar el Visor VNC Integrado ahora mismo sin apps extra o descargar Termux:X11 APK para mayor fluidez (60 FPS).");
+                mX11NoticeText.setText("ℹ Puedes usar el Visor VNC Integrado o descargar Termux:X11 APK.");
                 mX11NoticeText.setTextColor(Color.parseColor("#79C0FF"));
                 mX11DownloadBtn.setVisibility(View.VISIBLE);
             }
@@ -5279,7 +5718,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
     @Override
     public void onSessionFinished(TerminalSession finishedSession) {
         if (finishedSession == mActiveDesktopSession) {
-            disconnectRfbClient();
+            disconnectDesktopBackends();
             mActiveDesktopSession = null;
         }
         if (mService != null && mService.hasSession(finishedSession)) {

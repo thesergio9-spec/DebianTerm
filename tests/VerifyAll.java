@@ -22,6 +22,9 @@ import com.termux.terminal.TerminalOutput;
 import com.termux.terminal.TerminalSession;
 import com.termux.terminal.TerminalSessionClient;
 import com.termux.view.TerminalView;
+import com.termux.x11.CmdEntryPoint;
+import com.termux.x11.ICmdEntryInterface;
+import com.termux.x11.LorieView;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -158,7 +161,9 @@ public final class VerifyAll {
         testScrolledUpPreservedAcrossCsi3jRedrawAndTranscriptCapacity();
         testSafeAppExitOnLastShellExit();
         testRootExecCommandFallback();
-        System.out.println("ALL 27 VERIFICATION TESTS PASSED.");
+        testBuiltInNativeX11JniContract();
+        testDesktopOrientationAndResolution();
+        System.out.println("ALL 29 VERIFICATION TESTS PASSED.");
     }
 
     private static void testDecset2026() {
@@ -529,6 +534,7 @@ public final class VerifyAll {
         check(xfceInstall.contains("xfonts-base"), "Install cmd must include xfonts-base");
         check(xfceInstall.contains("--force-confdef"), "Install cmd must set dpkg --force-confdef");
         check(xfceInstall.contains("dbus-uuidgen"), "Install cmd must ensure dbus machine-id");
+        check(xfceInstall.contains("xkb-data"), "Install cmd must include xkb-data for built-in X11");
 
         String lxdeInstall = DesktopManager.generateDesktopInstallCommand(DesktopManager.DESKTOP_LXDE);
         check(lxdeInstall.contains("lxde-core"), "LXDE install cmd must include lxde-core");
@@ -554,8 +560,12 @@ public final class VerifyAll {
         check(x11Start.contains("XDG_RUNTIME_DIR=/tmp/runtime-root"), "Termux:X11 start must set XDG_RUNTIME_DIR=/tmp/runtime-root");
         check(x11Start.contains("lxpolkit.desktop"), "LXDE X11 start must mask lxpolkit in container autostart");
 
-        String x11Server = DesktopManager.generateTermuxX11ServerCommand("/data/app/x11/base.apk", "/data/app/x11/lib/arm64", "/tmp/deb-tmp");
-        check(x11Server.contains("debianterm-x11.log"), "Termux:X11 server must log to debianterm-x11.log");
+        String x11Server = DesktopManager.generateBuiltInX11ServerCommand(
+            "/data/app/deb/base.apk", "/data/app/deb/lib/arm64", "/tmp/deb-tmp", "/data/user/0/pkg/debian12-proot");
+        check(x11Server.contains("debianterm-x11.log"), "Built-in X11 server must log to debianterm-x11.log");
+        check(x11Server.contains("XKB_CONFIG_ROOT="), "Built-in X11 server must export XKB_CONFIG_ROOT");
+        check(x11Server.contains("XSTARTUP_LD_PRELOAD="), "Built-in X11 server must export XSTARTUP_LD_PRELOAD");
+        check(x11Server.contains("com.termux.x11.CmdEntryPoint"), "Built-in X11 server must launch CmdEntryPoint");
 
         DesktopManager.DesktopStatus ds = new DesktopManager.DesktopStatus();
         ds.prootDesktopInstalled = true;
@@ -1461,8 +1471,8 @@ public final class VerifyAll {
         }
 
         String manifest = new String(Files.readAllBytes(Paths.get("AndroidManifest.xml")), StandardCharsets.UTF_8);
-        check(manifest.contains("android:versionCode=\"12\"") && manifest.contains("android:versionName=\"2.4.3\""),
-            "AndroidManifest must bump versionCode=12 / versionName=2.4.3");
+        check(manifest.contains("android:versionCode=\"13\"") && manifest.contains("android:versionName=\"2.5.0\""),
+            "AndroidManifest must bump versionCode=13 / versionName=2.5.0");
         check(Files.exists(Paths.get("LICENSE"))
             && new String(Files.readAllBytes(Paths.get("LICENSE")), StandardCharsets.UTF_8)
                 .contains("GNU GENERAL PUBLIC LICENSE"),
@@ -1718,6 +1728,182 @@ public final class VerifyAll {
         check(Modifier.isPublic(getKind.getModifiers()), "DebianTermService.getSessionKind must be public");
 
         System.out.println("[PASS] Test 26: Safe full-app exit policy on last interactive shell exit");
+    }
+
+    private static void testBuiltInNativeX11JniContract() throws Exception {
+        ClassLoader cl = VerifyAll.class.getClassLoader();
+        Class<?> cmdCls = Class.forName("com.termux.x11.CmdEntryPoint", false, cl);
+        Class<?> bridgeCls = Class.forName("com.termux.x11.MainActivity", false, cl);
+        Class<?> viewCls = Class.forName("com.termux.x11.LorieView", false, cl);
+        Class<?> probeCls = Class.forName("com.termux.x11.LorieView$CriticalNativeProbe", false, cl);
+        Class<?> aidlCls = ICmdEntryInterface.class;
+
+        check("com.debianchroot.term.ACTION_X11_START".equals(CmdEntryPoint.ACTION_START),
+            "CmdEntryPoint.ACTION_START mismatch");
+        check(aidlCls.isInterface() && ICmdEntryInterface.Stub.class.getSuperclass() == android.os.Binder.class,
+            "ICmdEntryInterface.Stub must extend android.os.Binder");
+
+        // Verify CmdEntryPoint JNI contract (cmdentrypoint.cpp:63-65, 683-693)
+        String[] cmdNatives = {
+            "start", "getXConnection", "windowChanged", "cursorWindowChanged",
+            "getLogcatOutput", "reportFatalError", "connected"
+        };
+        for (String name : cmdNatives) {
+            boolean found = false;
+            for (Method m : cmdCls.getDeclaredMethods()) {
+                if (m.getName().equals(name) && Modifier.isNative(m.getModifiers())) {
+                    found = true;
+                    break;
+                }
+            }
+            check(found, "CmdEntryPoint missing native method: " + name);
+        }
+        cmdCls.getDeclaredMethod("setDocumentTag", String.class);
+        cmdCls.getDeclaredMethod("sendBroadcast");
+        cmdCls.getDeclaredMethod("sendBroadcastDelayed");
+
+        // Verify com.termux.x11.MainActivity JNI contract (activity.cpp:154-156, 624-630)
+        java.lang.reflect.Field hb = bridgeCls.getDeclaredField("lastServerHeartbeat");
+        check(hb.getType() == long.class, "MainActivity.lastServerHeartbeat must be long");
+        bridgeCls.getDeclaredMethod("clientConnectedStateChanged");
+        Method freeform = bridgeCls.getDeclaredMethod("nativeSetLaunchWindowingModeFreeform", Object.class);
+        check(Modifier.isStatic(freeform.getModifiers()) && Modifier.isNative(freeform.getModifiers()),
+            "nativeSetLaunchWindowingModeFreeform must be static native");
+
+        // Verify LorieView JNI contract (activity.cpp:167-182, 249-301, 418-587)
+        java.lang.reflect.Field actField = viewCls.getDeclaredField("activity");
+        check(actField.getType() == bridgeCls, "LorieView.activity must have type com.termux.x11.MainActivity");
+        Method probe = probeCls.getDeclaredMethod("probe", long.class);
+        check(Modifier.isStatic(probe.getModifiers()) && Modifier.isNative(probe.getModifiers()),
+            "LorieView$CriticalNativeProbe.probe(long) must be static native");
+
+        viewCls.getDeclaredMethod("setClipboardText", String.class);
+        viewCls.getDeclaredMethod("requestClipboard");
+        viewCls.getDeclaredMethod("setRendererViewport",
+            int.class, int.class, int.class, int.class,
+            float.class, float.class, float.class, float.class);
+        viewCls.getDeclaredMethod("resetIme");
+        viewCls.getDeclaredMethod("onSyncReply", int.class);
+
+        String[] viewNatives = {
+            "nativeInit", "nativeDestroy", "setViewport", "setRendererZoom",
+            "setZoomAnchor", "clearZoomAnchor", "setFollowCursorPan", "getCursorPosition",
+            "sendSync", "setFiltering", "connect", "connected", "startLogcat",
+            "setClipboardSyncEnabled", "sendClipboardAnnounce", "sendClipboardEvent",
+            "sendWindowChange", "sendMouseEvent", "sendTouchEvent", "sendStylusEvent",
+            "requestStylusEnabled", "sendLockKeysState", "sendKeyEvent", "sendTextEvent",
+            "requestConnection", "getLastInputTimestamp", "markUserActivity", "getCursorState"
+        };
+        for (String name : viewNatives) {
+            boolean found = false;
+            for (Method m : viewCls.getDeclaredMethods()) {
+                if (m.getName().equals(name) && Modifier.isNative(m.getModifiers())) {
+                    found = true;
+                    break;
+                }
+            }
+            check(found, "LorieView missing native method: " + name);
+        }
+
+        // Verify native ELF binaries in jniLibs
+        for (String abi : new String[] { "arm64-v8a", "armeabi-v7a" }) {
+            Path so = Paths.get("jniLibs", abi, "libXlorie.so");
+            check(Files.exists(so), "Missing libXlorie.so for " + abi);
+            byte[] hdr = Files.readAllBytes(so);
+            check(hdr.length > 1_000_000 && hdr[0] == 0x7f && hdr[1] == 'E' && hdr[2] == 'L' && hdr[3] == 'F',
+                "Invalid ELF header/size for " + so);
+        }
+
+        Method envBuilder = DebianTermService.class.getMethod("buildRawSessionEnv", String.class);
+        check(Modifier.isStatic(envBuilder.getModifiers()), "DebianTermService.buildRawSessionEnv must be public static");
+        String[] rawEnv = DebianTermService.buildRawSessionEnv("/data/user/0/com.debianchroot.term/files");
+        check(Arrays.stream(rawEnv).anyMatch(s -> s.startsWith("HOME=/data/user/0/com.debianchroot.term/files")),
+            "buildRawSessionEnv must set HOME");
+        check(Arrays.stream(rawEnv).anyMatch(s -> s.contains("/apex/com.android.art/bin")),
+            "buildRawSessionEnv must include Android ART bin PATH for app_process");
+
+        System.out.println("[PASS] Test 28: Built-in native X11 (libXlorie) JNI contract & ELF binaries");
+    }
+
+    private static void testDesktopOrientationAndResolution() throws Exception {
+        check("fit".equals(TerminalSettings.GUI_RESOLUTION_FIT), "GUI_RESOLUTION_FIT must equal 'fit'");
+        check(TerminalSettings.ALL_GUI_RESOLUTIONS.length == 4
+                && "fit".equals(TerminalSettings.ALL_GUI_RESOLUTIONS[0]),
+            "ALL_GUI_RESOLUTIONS[0] must be 'fit'");
+        check("Ajustar".equals(TerminalSettings.getGuiResolutionDisplayLabel("fit")),
+            "Display label for 'fit' must be 'Ajustar'");
+        check("1280x720".equals(TerminalSettings.getGuiResolutionDisplayLabel("1280x720")),
+            "Display label for '1280x720' must be preserved");
+        check("auto".equals(TerminalSettings.GUI_ORIENTATION_AUTO), "GUI_ORIENTATION_AUTO mismatch");
+        check("portrait".equals(TerminalSettings.GUI_ORIENTATION_PORTRAIT), "GUI_ORIENTATION_PORTRAIT mismatch");
+        check("landscape".equals(TerminalSettings.GUI_ORIENTATION_LANDSCAPE), "GUI_ORIENTATION_LANDSCAPE mismatch");
+
+        int[] p1 = DesktopManager.parseResolution("720x1280");
+        check(p1[0] == 720 && p1[1] == 1280, "parseResolution 720x1280 failed");
+        int[] p2 = DesktopManager.parseResolution("540x960");
+        check(p2[0] == 540 && p2[1] == 960, "parseResolution 540x960 failed");
+        int[] p3 = DesktopManager.parseResolution("1080x2400");
+        check(p3[0] == 1080 && p3[1] == 2400, "parseResolution 1080x2400 failed");
+        int[] pBad = DesktopManager.parseResolution("invalid");
+        check(pBad[0] == 1280 && pBad[1] == 720, "parseResolution invalid fallback must be 1280x720");
+
+        int[] fitPortrait = DesktopManager.computeFitResolution(1080, 2160, true);
+        check(fitPortrait[0] == 720 && fitPortrait[1] == 1440,
+            "computeFitResolution(1080, 2160, true) must be 720x1440, got " + fitPortrait[0] + "x" + fitPortrait[1]);
+        int[] fitLand = DesktopManager.computeFitResolution(1080, 2160, false);
+        check(fitLand[0] == 1440 && fitLand[1] == 720,
+            "computeFitResolution(1080, 2160, false) must be 1440x720, got " + fitLand[0] + "x" + fitLand[1]);
+        int[] fit720 = DesktopManager.computeFitResolution(720, 1400, true);
+        check(fit720[0] == 720 && fit720[1] == 1400,
+            "computeFitResolution(720, 1400, true) must be 720x1400, got " + fit720[0] + "x" + fit720[1]);
+
+        int[][] samples = {
+            { 1080, 1990 },
+            { 1080, 2400 },
+            { 1440, 3040 },
+            { 720, 1520 }
+        };
+        for (int[] s : samples) {
+            for (boolean port : new boolean[] { true, false }) {
+                int[] fit = DesktopManager.computeFitResolution(s[0], s[1], port);
+                check(fit[0] >= 480 && fit[1] >= 480, "Fit bounds must be >= 480");
+                check(fit[0] % 8 == 0, "Fit width must be multiple of 8 for CVT: " + fit[0]);
+                check(fit[1] % 2 == 0, "Fit height must be multiple of 2: " + fit[1]);
+                check(port ? (fit[0] <= fit[1]) : (fit[0] >= fit[1]), "Fit orientation mismatch");
+            }
+        }
+
+        int[] rFitPort = DesktopManager.resolveDesktopResolution("fit", "portrait", 1080, 2160);
+        check(rFitPort[0] == 720 && rFitPort[1] == 1440, "resolveDesktopResolution fit portrait mismatch");
+        int[] rFitLand = DesktopManager.resolveDesktopResolution("fit", "landscape", 1080, 2160);
+        check(rFitLand[0] == 1440 && rFitLand[1] == 720, "resolveDesktopResolution fit landscape mismatch");
+        int[] rFitAutoPort = DesktopManager.resolveDesktopResolution("fit", "auto", 1080, 2160);
+        check(rFitAutoPort[0] == 720 && rFitAutoPort[1] == 1440, "resolveDesktopResolution fit auto portrait mismatch");
+        int[] rFixedPort = DesktopManager.resolveDesktopResolution("1280x720", "portrait", 1080, 2160);
+        check(rFixedPort[0] == 720 && rFixedPort[1] == 1280, "resolveDesktopResolution 1280x720 portrait must swap to 720x1280");
+        int[] rFixedLand = DesktopManager.resolveDesktopResolution("960x540", "landscape", 1080, 2160);
+        check(rFixedLand[0] == 960 && rFixedLand[1] == 540, "resolveDesktopResolution 960x540 landscape must be 960x540");
+
+        String vncXfcePort = DesktopManager.generateVncStartCommand(DesktopManager.DESKTOP_XFCE, 720, 1440);
+        check(vncXfcePort.contains("-geometry 720x1440"), "XFCE VNC must support portrait geometry 720x1440");
+        String vncLxdePort = DesktopManager.generateVncStartCommand(DesktopManager.DESKTOP_LXDE, 540, 960);
+        check(vncLxdePort.contains("-geometry 540x960"), "LXDE VNC must support portrait geometry 540x960");
+        String[] vncScripts = { vncXfcePort, vncLxdePort };
+        for (int idx = 0; idx < vncScripts.length; idx++) {
+            Path tmp = Paths.get("/tmp/test-vnc-port-" + idx + ".sh");
+            Files.write(tmp, vncScripts[idx].getBytes(StandardCharsets.UTF_8));
+            try {
+                Process p = new ProcessBuilder("sh", "-n", tmp.toString()).start();
+                check(p.waitFor() == 0, "Portrait VNC script sh -n failed (" + idx + ")");
+            } finally {
+                Files.deleteIfExists(tmp);
+            }
+        }
+
+        Method setFit = LorieView.class.getMethod("setFitToScreen", boolean.class);
+        check(Modifier.isPublic(setFit.getModifiers()), "LorieView.setFitToScreen(boolean) must be public");
+
+        System.out.println("[PASS] Test 29: Desktop orientation & full-screen fit resolution (X11 & VNC)");
     }
 
     private static String fetchText(String urlStr) throws Exception {
