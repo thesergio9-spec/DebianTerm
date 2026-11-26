@@ -5,8 +5,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/thesergio9-spec/DebianTerm/releases/tag/v2.5.0">
-    <img src="https://img.shields.io/badge/release-v2.5.0-D70A53?style=flat-square" alt="Release v2.5.0">
+  <a href="https://github.com/thesergio9-spec/DebianTerm/releases/tag/v2.5.1">
+    <img src="https://img.shields.io/badge/release-v2.5.1-D70A53?style=flat-square" alt="Release v2.5.1">
   </a>
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/license-GPLv3-blue?style=flat-square" alt="Licencia GPLv3">
@@ -17,7 +17,7 @@
   </a>
 </p>
 
-**DebianTerm** (`v2.5.0`) es un **instalador completo de Debian 12 (Bookworm)** y emulador de terminal + escritorio gráfico para Android basado en el motor y teclado de Termux (`terminal-emulator` y `terminal-view`), con **verificación de requerimientos mínimos al iniciar**, selector **Terminal (CLI) vs Modo Gráfico Híbrido** y **dos caminos de ejecución totalmente funcionales**:
+**DebianTerm** (`v2.5.1`) es un **instalador completo de Debian 12 (Bookworm)** y emulador de terminal + escritorio gráfico para Android basado en el motor y teclado de Termux (`terminal-emulator` y `terminal-view`), con **verificación de requerimientos mínimos al iniciar**, selector **Terminal (CLI) vs Modo Gráfico Híbrido** y **dos caminos de ejecución totalmente funcionales**:
 
 1. **Camino 1 — Con Root (Chroot Nativo)**: máximo rendimiento del kernel Linux y montajes reales para dispositivos con Magisk, KernelSU o APatch.
 2. **Camino 2 — Sin Root (PRoot Integrado)**: motor `PRoot` empaquetado directamente en el APK (`arm64-v8a` y `armeabi-v7a`), **100% independiente de Termux**, para dispositivos sin acceso root.
@@ -28,7 +28,7 @@ Coexiste de forma independiente junto a Termux (`com.termux`) usando su propio p
 
 ## 📸 Capturas Reales
 
-> Capturadas en un Samsung Galaxy Note 10+ (Android 15) ejecutando DebianTerm `v2.5.0` y Debian 12 Bookworm.
+> Capturadas en un Samsung Galaxy Note 10+ (Android 15) ejecutando DebianTerm `v2.5.0+` y Debian 12 Bookworm.
 
 <table>
   <tr>
@@ -46,7 +46,7 @@ Coexiste de forma independiente junto a Termux (`com.termux`) usando su propio p
 
 Descarga el APK compilado desde la última Release:
 
-- **[DebianTerm.apk (v2.5.0)](https://github.com/thesergio9-spec/DebianTerm/releases/download/v2.5.0/DebianTerm.apk)**
+- **[DebianTerm.apk (v2.5.1)](https://github.com/thesergio9-spec/DebianTerm/releases/download/v2.5.1/DebianTerm.apk)**
 
 ---
 
@@ -61,7 +61,7 @@ DebianTerm es software libre sin publicidad, sin telemetría y con código verif
 
 ---
 
-## 🚀 Características Principales (`v2.5.0`)
+## 🚀 Características Principales (`v2.5.1`)
 
 ### 1. Panel de Inicio y Verificación de Requerimientos Mínimos
 Al abrir la app se ejecuta automáticamente un diagnóstico (`SystemRequirements`) antes de instalar o iniciar Debian 12:
@@ -72,8 +72,8 @@ Al abrir la app se ejecuta automáticamente un diagnóstico (`SystemRequirements
 - **Inicio automático opcional**: interruptor (**"Entrar automáticamente a Debian 12 al iniciar"**) que respeta tu modo elegido (Terminal CLI o Modo Gráfico).
 
 ### 2. Modo Gráfico Híbrido antes de iniciar Debian 12 (XFCE4 / LXDE)
-- **X11 Nativo Integrado (`libXlorie` 60 FPS — sin apps externas)**: incluye `libXlorie.so` (`arm64-v8a` y `armeabi-v7a`) empaquetado directamente en DebianTerm junto a `LorieView` y `CmdEntryPoint` puros en Java para renderizado acelerado EGL. Soporta orientación **Vertical / Horizontal / Auto**, botón rápido en vivo (`↕ Vert` / `↔ Horiz` / `⟳ Auto`) y modo pantalla completa **`Ajustar`** además de presets (`1280x720`, `960x540`, `1600x900`).
-- **Visor VNC Integrado (`RfbClient` + `VncCanvasView` + `Xtigervnc`)**: cliente RFB 3.8 puro en Java (`Raw`, `CopyRect`, `Zlib`, `DesktopSize`, portapapeles `ServerCutText`) conectado a `127.0.0.1:5901` como respaldo integrado con soporte **Vertical** y **`Ajustar`**, modos **Touchpad** y **Táctil directo**, pellizco-zoom, teclado X11 e intercambio rápido `>_ Term`.
+- **X11 Nativo Integrado (`libXlorie` 60 FPS — sin apps externas)**: incluye `libXlorie.so` (`arm64-v8a` y `armeabi-v7a`) empaquetado directamente en DebianTerm junto a `LorieView` y `CmdEntryPoint` puros en Java para renderizado acelerado EGL. Soporta orientación **Vertical / Horizontal / Auto por sensor**, botón rápido en vivo (`↕ Vert` / `↔ Horiz` / `⟳ Auto`), modo pantalla completa **`Ajustar`** + presets (`1280x720`, `960x540`, `1600x900`), protección `SOFT_INPUT_ADJUST_PAN` para no girar al abrir teclado en vertical, limpieza automática de procesos X11/VNC huérfanos (Root y PRoot) y supresión limpia de `lxpolkit` en LXDE.
+- **Visor VNC Integrado (`RfbClient` + `VncCanvasView` + `Xtigervnc`)**: cliente RFB 3.8 puro en Java (`Raw`, `CopyRect`, `Zlib`, `DesktopSize`, redimensión dinámica en vivo mediante `ExtendedDesktopSize` `-308` / `SetDesktopSize` `251` sin reiniciar `Xtigervnc`, portapapeles `ServerCutText` y escritura FIFO asíncrona en segundo plano) conectado a `127.0.0.1:5901` con soporte **Vertical** y **`Ajustar`**, modos **Touchpad** y **Táctil directo**, pellizco-zoom, teclado X11 e intercambio rápido `>_ Term`.
 - **Instalador de escritorio en 1 toque**: instala **XFCE4 (Completo)** o **LXDE (Ligero)** con `xkb-data`, `dbus-x11` y TigerVNC.
 
 ### 3. Dos Caminos de Instalación y Ejecución Debian 12
@@ -83,14 +83,14 @@ Al abrir la app se ejecuta automáticamente un diagnóstico (`SystemRequirements
 ### 4. Menú Lateral Simplificado, Antirebobinado y Productividad
 - **Menú Lateral Compacto de 3 Filas:** organiza las acciones en 3 filas inferiores (**`+ Nueva sesión`** -> selector Root / PRoot / Shell Android; **`Wake`** + **`Herramientas`** -> Snippets / `setup-storage` / SAF / Respaldos / Autoarranque; **`Inicio` / `Ajustes` / `Acerca`**), dejando mucho más espacio libre para sesiones activas.
 - **Motor Antirebobinado para Conversaciones Largas (`v2.4.2`):** cola PTY de 128 KB con drenaje en ráfaga (512 KB / 12 ms), `DECSET 2026` extendido hasta 1000 ms (guardia de inactividad de 250 ms), coalescencia tras borrados completos `CSI 2 J` / `3 J` (16–64 ms), preservación del scroll al leer arriba durante redibujados `CSI 3 J` e histéresis de altura sin falsos `SIGWINCH` al abrir teclado o barras (`🔍` / `📝`).
-- **Salida Segura con `exit` y Wake Lock Sincronizado (`v2.4.2`):** al ejecutar `exit` en la única sesión interactiva activa cierra Wake/WiFi Lock, detiene `DebianTermService` y cierra la app (`finishAndRemoveTask`); con varias sesiones abiertas solo cierra esa pestaña. La cortina de notificaciones (`Activar Wake` / `Soltar Wake`) se sincroniza en vivo con el título y el menú lateral.
+- **Salida Segura con `exit` y Wake Lock Persistente:** al ejecutar `exit` en la única sesión interactiva activa cierra Wake/WiFi Lock, detiene `DebianTermService` y cierra la app (`finishAndRemoveTask`); con varias sesiones abiertas solo cierra esa pestaña. Al activar o desactivar Wake Lock manualmente desde el menú lateral o notificación (`Activar Wake` / `Soltar Wake`), su estado persiste entre sesiones y reinicios.
 - **Gráficos Sixel inline (`SixelDecoder` / `SixelImage`):** decodificador nativo DEC VT340/XTerm (`img2sixel`, `chafa`, `lsix`, `gnuplot`), reporte DA1 (`;4;`) y `XTSMGRAPHICS` (`256` colores), anclaje al *scrollback* y demo directa en **Ajustes rápidos**.
 - **Búsqueda en Terminal (`TerminalSearch`) sobre 10,000 líneas:** historial ampliado a 10,000 filas con sensibilidad `Aa`, `▲`/`▼` y copia rápida.
 - **Snippets (`SnippetManager`) y Barra Gboard/Voz (`📝`)**: comandos rápidos y barra de entrada deslizable con autocorrección y dictado.
 - **Mitigador de *Phantom Process Killer* (`PhantomProcessManager`)**: detecta `signal 9` en Android 12–15 y ofrece fix directo con Root o comandos ADB exactos sin Root.
 - **Storage Access Framework (`DebianDocumentsProvider`)**: acceso a `/root` sin root desde Material Files, Acode, QuickEdit o Archivos sin copiar por `/sdcard`.
 - **Respaldo y Restauración `.tar.gz` (`BackupManager`)**: copias de Home + Ajustes, Rootfs PRoot completo o `/root` Chroot.
-- **Personalización sin dotfiles**: Nerd Font integrada (`MesloLGS_NF_Regular.ttf`), importación de fuentes `.ttf`/`.otf`, 5 esquemas de color, **Material You** (Android 12+), editor visual de teclas extra, Wake Lock + `WifiLock` y autoarranque opcional (`BootReceiver`).
+- **Personalización sin dotfiles**: Nerd Font integrada (`MesloLGS_NF_Regular.ttf`), importación de fuentes `.ttf`/`.otf`, 5 esquemas de color, **Material You** (Android 12+), barra de teclas extra basada en `LinearLayout` con editor visual y presets, Wake Lock + `WifiLock` y autoarranque opcional (`BootReceiver`).
 
 ---
 
@@ -112,7 +112,7 @@ DebianTerm/
 │   └── com/termux/x11/          # Puente X11 Nativo Lorie (CmdEntryPoint, ICmdEntryInterface, LorieView, MainActivity)
 ├── libs/                        # Bibliotecas JAR (annotation-1.5.0, xz-1.9)
 ├── jniLibs/                     # Binarios nativos arm64-v8a y armeabi-v7a (libtermux.so, libXlorie.so, PRoot)
-├── tests/                       # Suite de 29 pruebas unitarias en JVM (VerifyAll.java)
+├── tests/                       # Suite de 30 pruebas unitarias en JVM (VerifyAll.java)
 ├── setup-deps.sh                # Descarga componentes base Termux, JARs, libXlorie.so y PRoot (SHA-256)
 └── build.sh                     # Compilación completa (aapt2, javac, d8, zipalign, apksigner)
 ```
@@ -134,7 +134,7 @@ El APK firmado se genera en `build/DebianTerm-release.apk`.
 
 ## 🧪 Pruebas Unitarias
 
-La suite [VerifyAll.java](tests/VerifyAll.java) valida en JVM **29 pruebas clave** (`DECSET 2026`, modo Pan, redibujados sincronizados `>100 KB` y coalescencia de borrado, preservación de scroll `CSI 3 J` / 10,000 líneas, salida segura tras `exit` y sincronización de notificación Wake Lock, parser LXC/SHA-256, scripts `sh -n` y fallback `exec` Root, temas de color, requisitos, `TarExtractor`, PRoot, cierre suave, scripts gráficos XFCE4/LXDE, cliente RFB 3.8, sesiones, `setup-storage`, `PhantomProcessManager`, `TerminalSearch`, `SnippetManager`, `DebianDocumentsProvider`, `BackupManager` `.tar.gz`, Teclas Extra / Nerd Font TTF, `BootReceiver`, `SixelDecoder`, `TerminalEmulator` Sixel, contrato JNI/ELF X11 nativo integrado y orientación/resolución `Ajustar` para X11 y VNC):
+La suite [VerifyAll.java](tests/VerifyAll.java) valida en JVM **30 pruebas clave** (`DECSET 2026`, modo Pan, redibujados sincronizados `>100 KB` y coalescencia de borrado, preservación de scroll `CSI 3 J` / 10,000 líneas, salida segura tras `exit` y sincronización de notificación Wake Lock, parser LXC/SHA-256, scripts `sh -n` y fallback `exec` Root, temas de color, requisitos, `TarExtractor`, PRoot, cierre suave, scripts gráficos XFCE4/LXDE, cliente RFB 3.8, sesiones, `setup-storage`, `PhantomProcessManager`, `TerminalSearch`, `SnippetManager`, `DebianDocumentsProvider`, `BackupManager` `.tar.gz`, Teclas Extra / Nerd Font TTF, `BootReceiver`, `SixelDecoder`, `TerminalEmulator` Sixel, contrato JNI/ELF X11 nativo integrado, orientación/resolución `Ajustar` y limpieza de procesos X11/VNC huérfanos + redimensión RFB en vivo):
 
 ```bash
 javac -encoding UTF-8 -cp build/classes:/opt/android-sdk/android.jar:libs/xz-1.9.jar -d build/test-classes tests/VerifyAll.java
