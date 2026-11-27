@@ -40,8 +40,12 @@ public final class RfbClient {
     }
 
     private final Object mOutLock = new Object();
+    private final Object mPauseLock = new Object();
     private volatile boolean mClosed = false;
     private volatile boolean mConnected = false;
+    private volatile boolean mPaused = false;
+    private boolean mDeferredUpdatePending = false;
+    private boolean mDeferredNeedFull = false;
 
     private Socket mSocket;
     private InputStream mIn;
@@ -64,6 +68,38 @@ public final class RfbClient {
 
     public boolean isConnected() {
         return mConnected && !mClosed;
+    }
+
+    public boolean isPaused() {
+        return mPaused;
+    }
+
+    /**
+     * Pauses or resumes outgoing FramebufferUpdateRequests while keeping the RFB socket
+     * and Zlib stream alive and synchronized.
+     */
+    public void setPaused(boolean paused) {
+        boolean sendNow = false;
+        boolean incremental = true;
+        int w = 0;
+        int h = 0;
+        synchronized (mPauseLock) {
+            if (mPaused == paused) {
+                return;
+            }
+            mPaused = paused;
+            if (!paused && mConnected && !mClosed && mDeferredUpdatePending && mWidth > 0 && mHeight > 0) {
+                sendNow = true;
+                incremental = !mDeferredNeedFull;
+                mDeferredUpdatePending = false;
+                mDeferredNeedFull = false;
+                w = mWidth;
+                h = mHeight;
+            }
+        }
+        if (sendNow) {
+            sendFramebufferUpdateRequest(incremental, 0, 0, w, h);
+        }
     }
 
     public int getWidth() {
@@ -93,6 +129,10 @@ public final class RfbClient {
     public void disconnect() {
         mClosed = true;
         mConnected = false;
+        synchronized (mPauseLock) {
+            mDeferredUpdatePending = false;
+            mDeferredNeedFull = false;
+        }
         shutdownWriter();
         closeSocketQuietly();
         if (mZlibInflater != null) {
@@ -175,7 +215,7 @@ public final class RfbClient {
             return false;
         }
         sendSetDesktopSizePacket(w, h);
-        sendFramebufferUpdateRequest(true, 0, 0, mWidth, mHeight);
+        requestNextFrameOrDefer(false);
         return true;
     }
 
@@ -482,6 +522,33 @@ public final class RfbClient {
         }
     }
 
+    private void requestNextFrameOrDefer(boolean needFull) {
+        boolean sendNow = false;
+        boolean incremental = !needFull;
+        int w;
+        int h;
+        synchronized (mPauseLock) {
+            w = mWidth;
+            h = mHeight;
+            if (mPaused) {
+                mDeferredUpdatePending = true;
+                if (needFull) {
+                    mDeferredNeedFull = true;
+                }
+            } else {
+                sendNow = true;
+                if (mDeferredNeedFull) {
+                    incremental = false;
+                    mDeferredNeedFull = false;
+                }
+                mDeferredUpdatePending = false;
+            }
+        }
+        if (sendNow && !mClosed && w > 0 && h > 0) {
+            sendFramebufferUpdateRequest(incremental, 0, 0, w, h);
+        }
+    }
+
     private void readServerMessages(FrameListener listener) throws IOException, DataFormatException {
         byte[] rawScratch = new byte[65536];
         while (!mClosed) {
@@ -589,7 +656,7 @@ public final class RfbClient {
                         }
                     }
                     if (!mClosed && mWidth > 0 && mHeight > 0) {
-                        sendFramebufferUpdateRequest(!needFullAfterResize, 0, 0, mWidth, mHeight);
+                        requestNextFrameOrDefer(needFullAfterResize);
                     }
                     break;
                 }

@@ -759,7 +759,7 @@ public final class DebianTermService extends Service {
             WifiManager wm = (WifiManager) getApplicationContext().getSystemService(WIFI_SERVICE);
             if (wm != null) {
                 try {
-                    mWifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "DebianTerm:SessionWifiLock");
+                    mWifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL, "DebianTerm:SessionWifiLock");
                     mWifiLock.setReferenceCounted(false);
                 } catch (RuntimeException ignored) {
                     mWifiLock = null;

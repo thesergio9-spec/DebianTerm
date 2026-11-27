@@ -39,8 +39,14 @@ public class CmdEntryPoint extends ICmdEntryInterface.Stub {
     static Handler handler;
     public static Context ctx;
 
+    private static final long DISCONNECTED_FAST_POLL_MS = 1000L;
+    private static final long DISCONNECTED_IDLE_POLL_MS = 5000L;
+    private static final int FAST_POLL_MAX_ATTEMPTS = 30;
+
     private final Intent mIntent = createIntent();
+    private final Runnable mBroadcastPollRunnable = this::sendBroadcastDelayed;
     private boolean mBroadcastPending = false;
+    private int mDisconnectedPollCount = 0;
 
     static {
         try {
@@ -106,17 +112,30 @@ public class CmdEntryPoint extends ICmdEntryInterface.Stub {
                 mBroadcastPending = false;
             }
             sendBroadcast(mIntent);
+            if (!connected()) {
+                mDisconnectedPollCount = 0;
+                handler.removeCallbacks(mBroadcastPollRunnable);
+                handler.postDelayed(mBroadcastPollRunnable, DISCONNECTED_FAST_POLL_MS);
+            }
         }, 250L);
     }
 
     /**
      * Called from native at startup and periodically while no Activity view is connected.
+     * Stops polling once a client connects to avoid 1 Hz background CPU wakeups.
      */
     private void sendBroadcastDelayed() {
-        if (!connected()) {
-            sendBroadcast(mIntent);
+        handler.removeCallbacks(mBroadcastPollRunnable);
+        if (connected()) {
+            mDisconnectedPollCount = 0;
+            return;
         }
-        handler.postDelayed(this::sendBroadcastDelayed, 1000L);
+        sendBroadcast(mIntent);
+        mDisconnectedPollCount++;
+        long nextDelay = mDisconnectedPollCount < FAST_POLL_MAX_ATTEMPTS
+            ? DISCONNECTED_FAST_POLL_MS
+            : DISCONNECTED_IDLE_POLL_MS;
+        handler.postDelayed(mBroadcastPollRunnable, nextDelay);
     }
 
     static void sendBroadcast(Intent intent) {

@@ -267,11 +267,12 @@ public final class DesktopManager {
         sb.append("    _dt_disp=\"$1\"\n");
         sb.append("    _dt_srv=\"$2\"\n");
         sb.append("    _dt_pids=''\n");
-        sb.append("    for _dt_p in /proc/[0-9]*; do\n");
+        sb.append("    for _dt_cf in $(grep -aEl 'CmdEntryPoint|debianterm-x11|Xtigervnc|Xvnc|startxfce4|xfce4-session|startlxde|lxsession|dbus-launch' /proc/[0-9]*/cmdline 2>/dev/null); do\n");
+        sb.append("        _dt_p=${_dt_cf%/cmdline}\n");
         sb.append("        _dt_pid=${_dt_p#/proc/}\n");
         sb.append("        [ \"$_dt_pid\" = \"$$\" ] && continue\n");
         sb.append("        [ -r \"$_dt_p/cmdline\" ] || continue\n");
-        sb.append("        _dt_cmd=$(tr '\\0' ' ' < \"$_dt_p/cmdline\" 2>/dev/null)\n");
+        sb.append("        _dt_cmd=$(dd if=\"$_dt_p/cmdline\" bs=4096 count=1 2>/dev/null | tr '\\0' ' ')\n");
         sb.append("        [ -n \"$_dt_cmd\" ] || continue\n");
         sb.append("        case \"$_dt_cmd\" in *_dt_kill_display*) continue ;; esac\n");
         sb.append("        _dt_hit=0\n");
@@ -283,7 +284,7 @@ public final class DesktopManager {
         sb.append("        if [ \"$_dt_hit\" = 0 ]; then\n");
         sb.append("            case \"$_dt_cmd\" in\n");
         sb.append("                *startxfce4*|*xfce4-session*|*startlxde*|*lxsession*|*dbus-launch*)\n");
-        sb.append("                    if tr '\\0' '\\n' < \"$_dt_p/environ\" 2>/dev/null | grep -qx \"DISPLAY=$_dt_disp\"; then _dt_hit=1; fi ;;\n");
+        sb.append("                    if [ -r \"$_dt_p/environ\" ] && dd if=\"$_dt_p/environ\" bs=4096 count=16 2>/dev/null | tr '\\0' '\\n' | grep -qx \"DISPLAY=$_dt_disp\"; then _dt_hit=1; fi ;;\n");
         sb.append("            esac\n");
         sb.append("        fi\n");
         sb.append("        if [ \"$_dt_hit\" = 1 ]; then _dt_pids=\"$_dt_pids $_dt_pid\"; fi\n");

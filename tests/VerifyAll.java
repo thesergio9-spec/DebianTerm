@@ -164,7 +164,8 @@ public final class VerifyAll {
         testBuiltInNativeX11JniContract();
         testDesktopOrientationAndResolution();
         testDesktopCleanupAndLiveVncResize();
-        System.out.println("ALL 30 VERIFICATION TESTS PASSED.");
+        testPowerAndResourceOptimizations();
+        System.out.println("ALL 31 VERIFICATION TESTS PASSED.");
     }
 
     private static void testDecset2026() {
@@ -1472,8 +1473,8 @@ public final class VerifyAll {
         }
 
         String manifest = new String(Files.readAllBytes(Paths.get("AndroidManifest.xml")), StandardCharsets.UTF_8);
-        check(manifest.contains("android:versionCode=\"14\"") && manifest.contains("android:versionName=\"2.5.1\""),
-            "AndroidManifest must bump versionCode=14 / versionName=2.5.1");
+        check(manifest.contains("android:versionCode=\"15\"") && manifest.contains("android:versionName=\"2.5.2\""),
+            "AndroidManifest must bump versionCode=15 / versionName=2.5.2");
         check(manifest.contains("|density|") && manifest.contains("fontScale")
                 && manifest.contains("layoutDirection") && manifest.contains("screenSize"),
             "MainActivity configChanges must cover density/fontScale/layoutDirection/screenSize");
@@ -2164,6 +2165,182 @@ public final class VerifyAll {
         }
 
         System.out.println("[PASS] Test 30: Orphan X11/VNC sweeper, session scripts (sh -n), live RFB resize & lifecycle API");
+    }
+
+    private static void testPowerAndResourceOptimizations() throws Exception {
+        // 1) DesktopManager /proc sweeper must never feed /proc/<pid>/{cmdline,environ} directly to tr (ESRCH spin bug)
+        String snipSrv0 = DesktopManager.buildCleanupDisplayProcessesSnippet(":0", true);
+        String snipSrv1 = DesktopManager.buildCleanupDisplayProcessesSnippet(":1", true);
+        for (String snip : new String[] { snipSrv0, snipSrv1 }) {
+            check(!snip.contains("< \"$_dt_p/cmdline\"") && !snip.contains("< \"$_dt_p/environ\""),
+                "Cleanup snippet must pipe via dd instead of redirecting /proc files directly to tr");
+            check(snip.contains("dd if=\"$_dt_p/cmdline\"") && snip.contains("dd if=\"$_dt_p/environ\""),
+                "Cleanup snippet must read /proc cmdline & environ with bounded dd");
+        }
+        shSyntaxCheck("cleanup-dd-srv0", snipSrv0);
+        shSyntaxCheck("cleanup-dd-srv1", snipSrv1);
+
+        // Verify large >8 KB environment before DISPLAY=:7 is still matched and killed, and concurrent ESRCH churn cannot hang
+        StringBuilder bigPad = new StringBuilder(12288);
+        for (int i = 0; i < 12288; i++) {
+            bigPad.append('X');
+        }
+        ProcessBuilder pbBig = new ProcessBuilder("bash", "-c", "exec -a xfce4-session sleep 305");
+        pbBig.environment().put("AAAA_PAD", bigPad.toString());
+        pbBig.environment().put("DISPLAY", ":7");
+        pbBig.redirectErrorStream(true);
+        Process largeEnvProc = pbBig.start();
+        Thread.sleep(250L);
+
+        final AtomicBoolean churnRun = new AtomicBoolean(true);
+        Thread churnThread = new Thread(() -> {
+            while (churnRun.get()) {
+                try {
+                    Process c = new ProcessBuilder("/bin/true").start();
+                    c.waitFor();
+                } catch (Throwable ignored) {
+                }
+            }
+        }, "ProcEsrchChurn");
+        churnThread.setDaemon(true);
+        churnThread.start();
+        try {
+            long t0 = System.currentTimeMillis();
+            runSnippet(DesktopManager.buildCleanupDisplayProcessesSnippet(":7", false));
+            runSnippet(DesktopManager.buildCleanupDisplayProcessesSnippet(":7", true));
+            long elapsedMs = System.currentTimeMillis() - t0;
+            check(elapsedMs < 4000L, "ESRCH-safe /proc cleanup took too long: " + elapsedMs + "ms");
+            check(waitDead(largeEnvProc, 3000L), "Sweeper must detect DISPLAY=:7 even with >12KB env");
+        } finally {
+            churnRun.set(false);
+            largeEnvProc.destroyForcibly();
+            churnThread.join(1000L);
+        }
+
+        // 2) RfbClient.setPaused(true/false) must halt FramebufferUpdateRequest loops in background and resume immediately
+        final java.util.concurrent.atomic.AtomicInteger reqCount = new java.util.concurrent.atomic.AtomicInteger(0);
+        final java.util.concurrent.atomic.AtomicInteger frameCount = new java.util.concurrent.atomic.AtomicInteger(0);
+        final CountDownLatch firstFrame = new CountDownLatch(1);
+        final AtomicReference<String> rfbErr = new AtomicReference<>();
+        final ServerSocket ss = new ServerSocket(0, 1, InetAddress.getLoopbackAddress());
+        int port = ss.getLocalPort();
+
+        Thread rfbSrv = new Thread(() -> {
+            try (Socket s = ss.accept()) {
+                DataInputStream dis = new DataInputStream(s.getInputStream());
+                DataOutputStream dos = new DataOutputStream(s.getOutputStream());
+                dos.write("RFB 003.008\n".getBytes(StandardCharsets.US_ASCII));
+                dos.flush();
+                dis.readFully(new byte[12]);
+                dos.writeByte(1);
+                dos.writeByte(1);
+                dos.flush();
+                check(dis.readUnsignedByte() == 1, "Expected Security None");
+                dos.writeInt(0);
+                dos.flush();
+                dis.readUnsignedByte(); // ClientInit
+                dos.writeShort(1280);
+                dos.writeShort(720);
+                dos.write(new byte[16]);
+                dos.writeInt(0); // desktop name length
+                dos.flush();
+
+                dis.readFully(new byte[20]); // SetPixelFormat
+                check(dis.readUnsignedByte() == 2, "Expected SetEncodings");
+                dis.readUnsignedByte();
+                int encCount = dis.readUnsignedShort();
+                dis.readFully(new byte[encCount * 4]);
+
+                long deadline = System.currentTimeMillis() + 8000L;
+                while (System.currentTimeMillis() < deadline) {
+                    int t = dis.read();
+                    if (t == -1) break;
+                    if (t == 3) {
+                        dis.readFully(new byte[9]);
+                        reqCount.incrementAndGet();
+                        Thread.sleep(25L);
+                        dos.writeByte(0); // FramebufferUpdate
+                        dos.writeByte(0); // padding
+                        dos.writeShort(1); // numRects
+                        dos.writeShort(0);
+                        dos.writeShort(0);
+                        dos.writeShort(1);
+                        dos.writeShort(1);
+                        dos.writeInt(RfbClient.ENCODING_RAW);
+                        dos.writeInt(0x11223344);
+                        dos.flush();
+                    } else {
+                        break;
+                    }
+                }
+            } catch (Throwable t) {
+                rfbErr.set(t.toString());
+            } finally {
+                try { ss.close(); } catch (Exception ignored) { }
+            }
+        }, "MockRfbPauseServer");
+        rfbSrv.setDaemon(true);
+        rfbSrv.start();
+
+        RfbClient client = new RfbClient();
+        try {
+            client.connectWithRetry("127.0.0.1", port, "", 5, 50L, new RfbClient.FrameListener() {
+                @Override public void onConnected(int width, int height, String desktopName) { }
+                @Override public void onFramebufferResize(int width, int height) { }
+                @Override
+                public void onFrameUpdated(int[] pixels, int width, int height, int x, int y, int w, int h) {
+                    frameCount.incrementAndGet();
+                    firstFrame.countDown();
+                }
+                @Override public void onServerCutText(String text) { }
+                @Override public void onDisconnected(String reason) { }
+            });
+
+            check(firstFrame.await(4, TimeUnit.SECONDS),
+                "Expected initial RFB frame (err=" + rfbErr.get() + ")");
+            check(!client.isPaused(), "RfbClient must start unpaused");
+
+            client.setPaused(true);
+            check(client.isPaused(), "RfbClient.isPaused() must return true after setPaused(true)");
+            Thread.sleep(120L); // drain any single in-flight frame
+            int reqAtPause = reqCount.get();
+            Thread.sleep(250L);
+            check(reqCount.get() == reqAtPause,
+                "Paused RfbClient must not send FramebufferUpdateRequest (before=" + reqAtPause
+                    + ", after=" + reqCount.get() + ")");
+
+            int framesBeforeResume = frameCount.get();
+            client.setPaused(false);
+            check(!client.isPaused(), "RfbClient.isPaused() must return false after setPaused(false)");
+            long resumeUntil = System.currentTimeMillis() + 2000L;
+            while (System.currentTimeMillis() < resumeUntil
+                    && (reqCount.get() <= reqAtPause || frameCount.get() <= framesBeforeResume)) {
+                Thread.sleep(25L);
+            }
+            check(reqCount.get() > reqAtPause && frameCount.get() > framesBeforeResume,
+                "Resumed RfbClient must immediately request and deliver fresh frames (err=" + rfbErr.get() + ")");
+        } finally {
+            client.disconnect();
+            rfbSrv.join(2000L);
+        }
+
+        // 3) LorieView host pause API, CmdEntryPoint JNI signatures & DebianTermService power-safe WifiLock
+        Method setHostPaused = LorieView.class.getMethod("setHostPaused", boolean.class);
+        Method isHostPaused = LorieView.class.getMethod("isHostPaused");
+        check(Modifier.isPublic(setHostPaused.getModifiers()), "LorieView.setHostPaused(boolean) must be public");
+        check(Modifier.isPublic(isHostPaused.getModifiers()) && isHostPaused.getReturnType() == boolean.class,
+            "LorieView.isHostPaused() must be public boolean");
+
+        CmdEntryPoint.class.getDeclaredMethod("sendBroadcast");
+        CmdEntryPoint.class.getDeclaredMethod("sendBroadcastDelayed");
+
+        String svcSrc = new String(
+            Files.readAllBytes(Paths.get("src/com/debianchroot/term/DebianTermService.java")),
+            StandardCharsets.UTF_8);
+        check(svcSrc.contains("WIFI_MODE_FULL") && !svcSrc.contains("WIFI_MODE_FULL_HIGH_PERF"),
+            "DebianTermService must use WIFI_MODE_FULL instead of deprecated WIFI_MODE_FULL_HIGH_PERF");
+
+        System.out.println("[PASS] Test 31: Power & CPU optimizations (ESRCH-safe /proc sweeper, RFB pause/resume, adaptive X11 cursor & WifiLock)");
     }
 
     private static String fetchText(String urlStr) throws Exception {

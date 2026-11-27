@@ -159,6 +159,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
     private RfbClient mRfbClient;
     private ICmdEntryInterface mX11Service;
     private boolean mActiveDesktopIsX11 = false;
+    private boolean mActivityStarted = false;
     private BroadcastReceiver mX11Receiver;
     private final Handler mX11Handler = new Handler(Looper.getMainLooper());
     private int mX11ConnectAttempt = 0;
@@ -220,6 +221,16 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
     private void syncRunningDesktopFromSettings() {
         if (mActiveDesktopSession != null && mActiveDesktopSession.isRunning()) {
             syncActiveDesktopDisplayConfig();
+        }
+    }
+
+    private void updateDesktopPowerState() {
+        boolean desktopActiveAndVisible = mActivityStarted && isDesktopVisible();
+        if (mLorieView != null) {
+            mLorieView.setHostPaused(!desktopActiveAndVisible || !mActiveDesktopIsX11);
+        }
+        if (mRfbClient != null) {
+            mRfbClient.setPaused(!desktopActiveAndVisible || mActiveDesktopIsX11);
         }
     }
 
@@ -408,6 +419,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
     @Override
     protected void onStart() {
         super.onStart();
+        mActivityStarted = true;
         if (mBound && mService != null) {
             mService.setClientVisible(true);
             mService.pruneCleanlyFinishedSessions();
@@ -445,6 +457,15 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         if (mTerminalView != null && isTerminalVisible()) {
             mTerminalView.setTerminalCursorBlinkerRate(500);
             mTerminalView.setTerminalCursorBlinkerState(true, true);
+        }
+        updateDesktopPowerState();
+        if (isDesktopVisible()) {
+            if (mActiveDesktopIsX11 && mLorieView != null && !mLorieView.connected()
+                    && mActiveDesktopSession != null && mActiveDesktopSession.isRunning()) {
+                scheduleX11Connect(0);
+            } else if (!mActiveDesktopIsX11 && mVncCanvas != null) {
+                mVncCanvas.postInvalidate();
+            }
         }
     }
 
@@ -519,6 +540,9 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
     @Override
     protected void onStop() {
         super.onStop();
+        mActivityStarted = false;
+        mX11Handler.removeCallbacks(mX11ConnectRunnable);
+        updateDesktopPowerState();
         if (mTerminalView != null) {
             mTerminalView.setTerminalCursorBlinkerState(false, true);
         }
@@ -631,6 +655,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         if (mDesktopView != null) mDesktopView.setVisibility(View.GONE);
         if (mTerminalView != null) mTerminalView.setTerminalCursorBlinkerState(false, true);
         if (mDashboardView != null) mDashboardView.setVisibility(View.VISIBLE);
+        updateDesktopPowerState();
         if (mService != null) {
             mService.pruneCleanlyFinishedSessions();
             if (mCurrentSession != null && !mService.hasSession(mCurrentSession)) {
@@ -649,6 +674,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         if (mDashboardView != null) mDashboardView.setVisibility(View.GONE);
         if (mDesktopView != null) mDesktopView.setVisibility(View.GONE);
         if (mDrawerLayout != null) mDrawerLayout.setVisibility(View.VISIBLE);
+        updateDesktopPowerState();
         if (mTerminalView != null) {
             mTerminalView.requestFocus();
             mTerminalView.setTerminalCursorBlinkerRate(500);
@@ -664,6 +690,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         }
         if (mTerminalView != null) mTerminalView.setTerminalCursorBlinkerState(false, true);
         if (mDesktopView != null) mDesktopView.setVisibility(View.VISIBLE);
+        updateDesktopPowerState();
         getWindow().setSoftInputMode(
             android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_PAN
                 | android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);
@@ -2176,6 +2203,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         RfbClient client = new RfbClient();
         mRfbClient = client;
         mVncCanvas.attachClient(client);
+        updateDesktopPowerState();
         client.connectWithRetry("127.0.0.1", DesktopManager.VNC_PORT, "", 60, 250L, new RfbClient.FrameListener() {
             @Override
             public void onConnected(int width, int height, String desktopName) {
@@ -2401,6 +2429,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
     private void disconnectDesktopBackends() {
         disconnectRfbClient();
         disconnectX11Client();
+        updateDesktopPowerState();
     }
 
     private void disconnectX11Client() {

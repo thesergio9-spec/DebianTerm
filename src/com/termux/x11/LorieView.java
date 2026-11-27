@@ -135,17 +135,116 @@ public class LorieView extends FrameLayout implements ClipboardManager.OnPrimary
     private boolean mDirectDragging = false;
     private long mMultiTouchDownMs = 0L;
 
+    private static final long CURSOR_ACTIVE_WINDOW_MS = 600L;
+    private static final long CURSOR_IDLE_POLL_MS = 250L;
+    private static final long CURSOR_DISCONNECTED_POLL_MS = 500L;
+
     private final int[] mCursorState = new int[6];
+    private boolean mHostPaused = false;
+    private boolean mCursorPlacerScheduled = false;
+    private long mCursorFastUntilMs = 0L;
+    private int mLastAppliedCursorTx = Integer.MIN_VALUE;
+    private int mLastAppliedCursorTy = Integer.MIN_VALUE;
+    private int mLastAppliedCursorW = -1;
+    private int mLastAppliedCursorH = -1;
+
     private final Choreographer.FrameCallback mCursorPlacer = new Choreographer.FrameCallback() {
         @Override
         public void doFrame(long frameTimeNanos) {
-            if (!mAttachedToWindow || getVisibility() != View.VISIBLE) {
+            mCursorPlacerScheduled = false;
+            if (!shouldRunCursorLoop()) {
                 return;
             }
-            placeCursor();
-            Choreographer.getInstance().postFrameCallback(this);
+            if (!connected()) {
+                scheduleIdleCursorPoll(CURSOR_DISCONNECTED_POLL_MS);
+                return;
+            }
+            long now = android.os.SystemClock.uptimeMillis();
+            if (placeCursor()) {
+                mCursorFastUntilMs = now + CURSOR_ACTIVE_WINDOW_MS;
+            }
+            if (now < mCursorFastUntilMs) {
+                scheduleCursorVsync();
+            } else {
+                scheduleIdleCursorPoll(CURSOR_IDLE_POLL_MS);
+            }
         }
     };
+
+    private final Runnable mIdleCursorPoller = new Runnable() {
+        @Override
+        public void run() {
+            if (!shouldRunCursorLoop()) {
+                return;
+            }
+            if (!connected()) {
+                scheduleIdleCursorPoll(CURSOR_DISCONNECTED_POLL_MS);
+                return;
+            }
+            if (placeCursor()) {
+                wakeCursorLoop();
+            } else {
+                scheduleIdleCursorPoll(CURSOR_IDLE_POLL_MS);
+            }
+        }
+    };
+
+    private boolean shouldRunCursorLoop() {
+        return mAttachedToWindow && !mHostPaused
+            && getVisibility() == View.VISIBLE
+            && getWindowVisibility() == View.VISIBLE;
+    }
+
+    private void scheduleCursorVsync() {
+        if (!mCursorPlacerScheduled && shouldRunCursorLoop()) {
+            mCursorPlacerScheduled = true;
+            Choreographer.getInstance().postFrameCallback(mCursorPlacer);
+        }
+    }
+
+    private void scheduleIdleCursorPoll(long delayMs) {
+        mUiHandler.removeCallbacks(mIdleCursorPoller);
+        if (shouldRunCursorLoop()) {
+            mUiHandler.postDelayed(mIdleCursorPoller, delayMs);
+        }
+    }
+
+    private void wakeCursorLoop() {
+        if (!shouldRunCursorLoop()) {
+            return;
+        }
+        mCursorFastUntilMs = android.os.SystemClock.uptimeMillis() + CURSOR_ACTIVE_WINDOW_MS;
+        mUiHandler.removeCallbacks(mIdleCursorPoller);
+        scheduleCursorVsync();
+    }
+
+    private void stopCursorLoop() {
+        mCursorPlacerScheduled = false;
+        Choreographer.getInstance().removeFrameCallback(mCursorPlacer);
+        mUiHandler.removeCallbacks(mIdleCursorPoller);
+    }
+
+    private void invalidateCachedCursorPlacement() {
+        mLastAppliedCursorTx = Integer.MIN_VALUE;
+        mLastAppliedCursorTy = Integer.MIN_VALUE;
+        mLastAppliedCursorW = -1;
+        mLastAppliedCursorH = -1;
+    }
+
+    public void setHostPaused(boolean paused) {
+        if (mHostPaused == paused) return;
+        mHostPaused = paused;
+        if (paused) {
+            stopCursorLoop();
+        } else {
+            invalidateCachedCursorPlacement();
+            wakeCursorLoop();
+        }
+    }
+
+    public boolean isHostPaused() {
+        return mHostPaused;
+    }
 
     private final Runnable mSurfaceFollowUpRunnable = () -> updateViewport();
 
@@ -468,15 +567,14 @@ public class LorieView extends FrameLayout implements ClipboardManager.OnPrimary
     protected void onAttachedToWindow() {
         super.onAttachedToWindow();
         mAttachedToWindow = true;
-        if (getVisibility() == View.VISIBLE) {
-            Choreographer.getInstance().postFrameCallback(mCursorPlacer);
-        }
+        invalidateCachedCursorPlacement();
+        wakeCursorLoop();
     }
 
     @Override
     protected void onDetachedFromWindow() {
         mAttachedToWindow = false;
-        Choreographer.getInstance().removeFrameCallback(mCursorPlacer);
+        stopCursorLoop();
         mHandlerRemoveAll();
         if (mClipboard != null) {
             try {
@@ -495,11 +593,23 @@ public class LorieView extends FrameLayout implements ClipboardManager.OnPrimary
     protected void onVisibilityChanged(View changedView, int visibility) {
         super.onVisibilityChanged(changedView, visibility);
         if (changedView == this) {
-            Choreographer.getInstance().removeFrameCallback(mCursorPlacer);
+            stopCursorLoop();
             if (visibility == View.VISIBLE && mAttachedToWindow) {
-                Choreographer.getInstance().postFrameCallback(mCursorPlacer);
+                invalidateCachedCursorPlacement();
+                wakeCursorLoop();
                 sendSurface();
             }
+        }
+    }
+
+    @Override
+    protected void onWindowVisibilityChanged(int visibility) {
+        super.onWindowVisibilityChanged(visibility);
+        if (visibility == View.VISIBLE) {
+            invalidateCachedCursorPlacement();
+            wakeCursorLoop();
+        } else {
+            stopCursorLoop();
         }
     }
 
@@ -507,6 +617,7 @@ public class LorieView extends FrameLayout implements ClipboardManager.OnPrimary
         mUiHandler.removeCallbacks(mLongPressRunnable);
         mUiHandler.removeCallbacks(mPostResizeSyncRunnable);
         mUiHandler.removeCallbacks(mSurfaceFollowUpRunnable);
+        mUiHandler.removeCallbacks(mIdleCursorPoller);
     }
 
     /** Hands the current Picture & Cursor Surfaces to the active X server. */
@@ -521,33 +632,51 @@ public class LorieView extends FrameLayout implements ClipboardManager.OnPrimary
             setClipboardSyncEnabled(mNativeContext, mClipboardSyncEnabled, mClipboardSyncEnabled);
         }
         updateViewport();
+        wakeCursorLoop();
     }
 
     public void triggerCallback() {
         requestFocus();
         updateViewport();
+        wakeCursorLoop();
     }
 
-    private void placeCursor() {
+    private boolean placeCursor() {
         if (mNativeContext == 0 || mInputSourceWidth <= 0f || mInputSourceHeight <= 0f
             || mInputViewport.width() <= 0 || mInputViewport.height() <= 0
             || !getCursorState(mNativeContext, mCursorState)) {
-            return;
+            return false;
         }
         float scaleX = mInputViewport.width() / mInputSourceWidth;
         float scaleY = mInputViewport.height() / mInputSourceHeight;
         int w = Math.max(32, (Math.round(mCursorState[4] * scaleX) + 31) / 32 * 32);
         int h = Math.max(32, (Math.round(mCursorState[5] * scaleY) + 31) / 32 * 32);
+        int tx = Math.round(
+            mInputViewport.left + (mCursorState[0] - mCursorState[2] - mInputSourceLeft) * scaleX);
+        int ty = Math.round(
+            mInputViewport.top + (mCursorState[1] - mCursorState[3] - mInputSourceTop) * scaleY);
+
+        boolean changed = false;
         ViewGroup.LayoutParams params = mCursorView.getLayoutParams();
         if (params != null && (params.width != w || params.height != h)) {
             params.width = w;
             params.height = h;
             mCursorView.setLayoutParams(params);
+            mLastAppliedCursorW = w;
+            mLastAppliedCursorH = h;
+            changed = true;
         }
-        mCursorView.setTranslationX(Math.round(
-            mInputViewport.left + (mCursorState[0] - mCursorState[2] - mInputSourceLeft) * scaleX));
-        mCursorView.setTranslationY(Math.round(
-            mInputViewport.top + (mCursorState[1] - mCursorState[3] - mInputSourceTop) * scaleY));
+        if (tx != mLastAppliedCursorTx) {
+            mCursorView.setTranslationX(tx);
+            mLastAppliedCursorTx = tx;
+            changed = true;
+        }
+        if (ty != mLastAppliedCursorTy) {
+            mCursorView.setTranslationY(ty);
+            mLastAppliedCursorTy = ty;
+            changed = true;
+        }
+        return changed;
     }
 
     private void updateViewport() {
@@ -613,6 +742,8 @@ public class LorieView extends FrameLayout implements ClipboardManager.OnPrimary
             mInputSourceHeight = mXScreenSize.y;
         }
         mPictureView.setHole(mInputViewport);
+        invalidateCachedCursorPlacement();
+        wakeCursorLoop();
 
         if (mNativeContext != 0) {
             setViewport(mNativeContext, mViewport.left, mViewport.top, mViewport.width(), mViewport.height(),
@@ -651,6 +782,7 @@ public class LorieView extends FrameLayout implements ClipboardManager.OnPrimary
         if (!connected()) {
             return true;
         }
+        wakeCursorLoop();
         requestFocus();
         mScaleDetector.onTouchEvent(event);
 
@@ -754,6 +886,22 @@ public class LorieView extends FrameLayout implements ClipboardManager.OnPrimary
                 break;
         }
         return true;
+    }
+
+    @Override
+    public boolean onHoverEvent(MotionEvent event) {
+        if (connected()) {
+            wakeCursorLoop();
+        }
+        return super.onHoverEvent(event);
+    }
+
+    @Override
+    public boolean onGenericMotionEvent(MotionEvent event) {
+        if (connected()) {
+            wakeCursorLoop();
+        }
+        return super.onGenericMotionEvent(event);
     }
 
     private void handleDirectTouch(MotionEvent event) {
@@ -909,6 +1057,8 @@ public class LorieView extends FrameLayout implements ClipboardManager.OnPrimary
             mInputSourceWidth = sourceWidth;
             mInputSourceHeight = sourceHeight;
             mPictureView.setHole(mInputViewport);
+            invalidateCachedCursorPlacement();
+            wakeCursorLoop();
         });
     }
 
@@ -944,6 +1094,12 @@ public class LorieView extends FrameLayout implements ClipboardManager.OnPrimary
         mLastSentRefresh = 0;
         if (mNativeContext != 0) {
             connect(mNativeContext, fd);
+        }
+        invalidateCachedCursorPlacement();
+        if (fd >= 0) {
+            wakeCursorLoop();
+        } else {
+            stopCursorLoop();
         }
     }
 
