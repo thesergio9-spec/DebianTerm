@@ -574,6 +574,9 @@ public final class DebianTermService extends Service {
         mSessionKinds.remove(session);
         mSessionIsRoot.remove(session);
         refreshForegroundState();
+        if (wasRoot || kind == SessionKind.DEBIAN_ROOT) {
+            ChrootManager.invalidateStatusCache();
+        }
         if (stopDesktopProcesses && (kind == SessionKind.DESKTOP_X11 || kind == SessionKind.DESKTOP_VNC)) {
             stopDesktopProcessesAsync(wasRoot, kind == SessionKind.DESKTOP_X11);
         }

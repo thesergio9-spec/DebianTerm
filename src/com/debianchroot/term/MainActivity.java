@@ -319,6 +319,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
     private boolean mBound = false;
     private TerminalSession mCurrentSession;
     private boolean mInitialCheckDone = false;
+    private boolean mPendingDesktopInstallRefresh = false;
     private boolean mCheckInFlight = false;
     private boolean mNotifPromptedThisRun = false;
     private SystemRequirements.Report mLastReport = new SystemRequirements.Report(Collections.emptyList());
@@ -368,15 +369,18 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
                     showTerminalView();
                     switchToSession(target);
                 }
-                runRequirementsCheckAsync(false);
+                if (!mInitialCheckDone) {
+                    mInitialCheckDone = true;
+                    runRequirementsCheckAsync(false, false);
+                }
             } else {
                 mCurrentSession = null;
                 showDashboardView(false);
                 if (!mInitialCheckDone) {
                     mInitialCheckDone = true;
-                    runRequirementsCheckAsync(true);
+                    runRequirementsCheckAsync(true, true);
                 } else {
-                    runRequirementsCheckAsync(false);
+                    runRequirementsCheckAsync(false, false);
                 }
             }
             refreshDrawerSessions();
@@ -665,7 +669,9 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         updateDashboardResumeBar();
         updatePathButtonsForMode();
         if (triggerCheck) {
-            runRequirementsCheckAsync(false);
+            boolean force = mPendingDesktopInstallRefresh;
+            mPendingDesktopInstallRefresh = false;
+            runRequirementsCheckAsync(false, force);
         }
     }
 
@@ -970,7 +976,7 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
         titleCol.addView(subTv);
         header.addView(titleCol, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
-        header.addView(makeHeaderIconButton("↻", v -> runRequirementsCheckAsync(false)));
+        header.addView(makeHeaderIconButton("↻", v -> runRequirementsCheckAsync(false, true)));
         header.addView(makeHeaderIconButton("⚙", v -> showSettingsDialog()));
         container.addView(header);
 
@@ -2130,6 +2136,8 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
             this
         );
         switchToSession(session);
+        mPendingDesktopInstallRefresh = true;
+        ChrootManager.invalidateStatusCache();
         refreshDrawerSessions();
         updateDashboardResumeBar();
     }
@@ -2805,18 +2813,26 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
     // -------------------------------------------------------------------------
 
     private void runRequirementsCheckAsync(final boolean allowAutoEnter) {
+        runRequirementsCheckAsync(allowAutoEnter, false);
+    }
+
+    private void runRequirementsCheckAsync(final boolean allowAutoEnter, final boolean forceRootRefresh) {
         if (mCheckInFlight) return;
         mCheckInFlight = true;
-        if (mDashCheckSpinner != null) {
-            mDashCheckSpinner.setVisibility(View.VISIBLE);
-        }
-        if (mDashVerdictBanner != null) {
-            mDashVerdictBanner.setText("Verificando requerimientos del dispositivo...");
-            mDashVerdictBanner.setTextColor(Color.parseColor("#E6EDF3"));
+        boolean showLoadingState = mLastReport.items.isEmpty() || forceRootRefresh;
+        if (showLoadingState) {
+            if (mDashCheckSpinner != null) {
+                mDashCheckSpinner.setVisibility(View.VISIBLE);
+            }
+            if (mDashVerdictBanner != null) {
+                mDashVerdictBanner.setText("Verificando requerimientos del dispositivo...");
+                mDashVerdictBanner.setTextColor(Color.parseColor("#E6EDF3"));
+            }
         }
 
         mBgExecutor.execute(() -> {
-            final SystemRequirements.Report report = SystemRequirements.runCheck(MainActivity.this, mSettings);
+            final SystemRequirements.Report report = SystemRequirements.runCheck(
+                MainActivity.this, mSettings, forceRootRefresh);
             runOnUiThread(() -> {
                 mCheckInFlight = false;
                 mLastReport = report;
@@ -3243,7 +3259,8 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
             return;
         }
         if (!mLastReport.hasRoot) {
-            runRequirementsCheckAsync(false);
+            ChrootManager.clearSuCache();
+            runRequirementsCheckAsync(false, true);
             Toast.makeText(this, "Comprobando permisos root (su)...", Toast.LENGTH_SHORT).show();
             return;
         }
@@ -3429,12 +3446,14 @@ public final class MainActivity extends Activity implements TerminalViewClient, 
                     .setTitle("Acciones Chroot Root")
                     .setItems(opts, (d2, idx) -> {
                         if (idx == 0) {
-                            runRequirementsCheckAsync(false);
                             mBgExecutor.execute(() -> {
-                                ChrootManager.ChrootStatus fresh = ChrootManager.inspectStatus(fChroot, fScript);
+                                final SystemRequirements.Report fresh =
+                                    SystemRequirements.runCheck(MainActivity.this, mSettings, true);
                                 runOnUiThread(() -> {
-                                    mLastReport.rootStatus = fresh;
-                                    statusBox.setText(formatRootCardSummary(mLastReport));
+                                    mLastReport = fresh;
+                                    renderDashboardReport(fresh);
+                                    updateChrootStatusBadges(fresh);
+                                    statusBox.setText(formatRootCardSummary(fresh));
                                 });
                             });
                         } else if (idx == 1) {

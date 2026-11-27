@@ -99,25 +99,31 @@ public final class DesktopManager {
             }
         }
 
-        // 2. Inspect Root Chroot desktop & VNC packages (fast single su probe)
+        // 2. Inspect Root Chroot desktop & VNC packages (reuse unified probe when available)
         if (req.hasRoot && req.rootStatus.rootfsExists) {
-            String qChroot = ChrootManager.shellQuote(chrootPath);
-            String probeCmd =
-                "C=" + qChroot + "; " +
-                "[ -x \"$C/usr/bin/startxfce4\" ] && echo 'XFCE=1'; " +
-                "[ -x \"$C/usr/bin/startlxde\" ] && echo 'LXDE=1'; " +
-                "if [ -x \"$C/usr/bin/Xtigervnc\" ] || [ -x \"$C/usr/bin/Xvnc\" ]; then echo 'VNC=1'; fi";
-            String suBin = (req.suPath != null && !req.suPath.isEmpty())
-                ? req.suPath
-                : ChrootManager.resolveWorkingSuPath();
-            ChrootManager.ExecResult res = ChrootManager.execWithBinary(suBin, false, probeCmd, 5);
             boolean hasXfce = false;
             boolean hasLxde = false;
-            for (String line : res.stdout.split("\\r?\\n")) {
-                String t = line.trim();
-                if ("XFCE=1".equals(t)) hasXfce = true;
-                else if ("LXDE=1".equals(t)) hasLxde = true;
-                else if ("VNC=1".equals(t)) status.rootVncServerInstalled = true;
+            if (req.rootStatus.rootDesktopProbed) {
+                hasXfce = req.rootStatus.rootXfceInstalled;
+                hasLxde = req.rootStatus.rootLxdeInstalled;
+                status.rootVncServerInstalled = req.rootStatus.rootVncServerInstalled;
+            } else {
+                String qChroot = ChrootManager.shellQuote(chrootPath);
+                String probeCmd =
+                    "C=" + qChroot + "; " +
+                    "[ -x \"$C/usr/bin/startxfce4\" ] && echo 'XFCE=1'; " +
+                    "[ -x \"$C/usr/bin/startlxde\" ] && echo 'LXDE=1'; " +
+                    "if [ -x \"$C/usr/bin/Xtigervnc\" ] || [ -x \"$C/usr/bin/Xvnc\" ]; then echo 'VNC=1'; fi";
+                String suBin = (req.suPath != null && !req.suPath.isEmpty())
+                    ? req.suPath
+                    : ChrootManager.resolveWorkingSuPath();
+                ChrootManager.ExecResult res = ChrootManager.execWithBinary(suBin, false, probeCmd, 5);
+                for (String line : res.stdout.split("\\r?\\n")) {
+                    String t = line.trim();
+                    if ("XFCE=1".equals(t)) hasXfce = true;
+                    else if ("LXDE=1".equals(t)) hasLxde = true;
+                    else if ("VNC=1".equals(t)) status.rootVncServerInstalled = true;
+                }
             }
             status.rootXfceInstalled = hasXfce;
             status.rootLxdeInstalled = hasLxde;

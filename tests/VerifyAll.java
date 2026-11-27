@@ -165,7 +165,8 @@ public final class VerifyAll {
         testDesktopOrientationAndResolution();
         testDesktopCleanupAndLiveVncResize();
         testPowerAndResourceOptimizations();
-        System.out.println("ALL 31 VERIFICATION TESTS PASSED.");
+        testSingleShotRootProbeAndCache();
+        System.out.println("ALL 32 VERIFICATION TESTS PASSED.");
     }
 
     private static void testDecset2026() {
@@ -2341,6 +2342,160 @@ public final class VerifyAll {
             "DebianTermService must use WIFI_MODE_FULL instead of deprecated WIFI_MODE_FULL_HIGH_PERF");
 
         System.out.println("[PASS] Test 31: Power & CPU optimizations (ESRCH-safe /proc sweeper, RFB pause/resume, adaptive X11 cursor & WifiLock)");
+    }
+
+    private static void testSingleShotRootProbeAndCache() throws Exception {
+        String scriptWithPhantom = ChrootManager.buildUnifiedInspectScript(
+            "/debug_ramdisk/su", "/data/local/debian", "/data/local/bin/debian", true);
+        String scriptNoPhantom = ChrootManager.buildUnifiedInspectScript(
+            "/debug_ramdisk/su", "/data/local/debian", "/data/local/bin/debian", false);
+        shSyntaxCheck("unified-inspect-phantom", scriptWithPhantom);
+        shSyntaxCheck("unified-inspect-nophantom", scriptNoPhantom);
+        check(scriptWithPhantom.contains("__DT_ROOT_OK__") && scriptWithPhantom.contains("__DT_PHANTOM_BEGIN__"),
+            "Unified inspect script must emit root & phantom markers");
+        check(!scriptNoPhantom.contains("__DT_PHANTOM_BEGIN__"),
+            "Unified inspect script with includePhantom=false must omit phantom markers");
+
+        Path mockRoot = Files.createTempDirectory("dt-mock-chroot");
+        Path mockScript = Files.createTempFile("dt-mock-entry", ".sh");
+        try {
+            Path binDir = Files.createDirectories(mockRoot.resolve("bin"));
+            Path usrBinDir = Files.createDirectories(mockRoot.resolve("usr/bin"));
+            Path etcDir = Files.createDirectories(mockRoot.resolve("etc"));
+
+            Path bashFile = binDir.resolve("bash");
+            Files.write(bashFile, "#!/bin/sh\n".getBytes(StandardCharsets.UTF_8));
+            bashFile.toFile().setExecutable(true);
+
+            Path lxdeFile = usrBinDir.resolve("startlxde");
+            Files.write(lxdeFile, "#!/bin/sh\n".getBytes(StandardCharsets.UTF_8));
+            lxdeFile.toFile().setExecutable(true);
+
+            Path vncFile = usrBinDir.resolve("Xtigervnc");
+            Files.write(vncFile, "#!/bin/sh\n".getBytes(StandardCharsets.UTF_8));
+            vncFile.toFile().setExecutable(true);
+
+            Files.write(etcDir.resolve("debian_version"), "12.8\n".getBytes(StandardCharsets.UTF_8));
+            Files.write(etcDir.resolve("os-release"),
+                "PRETTY_NAME=\"Debian GNU/Linux 12 (bookworm)\"\n".getBytes(StandardCharsets.UTF_8));
+            Files.write(mockScript, "#!/bin/sh\n".getBytes(StandardCharsets.UTF_8));
+            mockScript.toFile().setExecutable(true);
+
+            String cmd = ChrootManager.buildUnifiedInspectScript(
+                "mock_su", mockRoot.toString(), mockScript.toString(), true);
+            String fullScript =
+                "id() { echo 0; }\n" +
+                "mock_su() { echo '27.0:MAGISKSU'; }\n" +
+                "settings() {\n" +
+                "  if [ \"$3\" = 'settings_enable_monitor_phantom_procs' ]; then echo 'false'; " +
+                "else echo 'max_phantom_processes=65536'; fi\n" +
+                "}\n" +
+                "device_config() { echo '2147483647'; }\n" +
+                cmd;
+
+            Process p = new ProcessBuilder("sh", "-c", fullScript).redirectErrorStream(true).start();
+            p.getOutputStream().close();
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            byte[] buf = new byte[4096];
+            int n;
+            while ((n = p.getInputStream().read(buf)) != -1) {
+                baos.write(buf, 0, n);
+            }
+            int rc = p.waitFor();
+            String stdout = new String(baos.toByteArray(), StandardCharsets.UTF_8);
+            check(rc == 0, "Mock unified inspect script failed rc=" + rc + " out=" + stdout);
+
+            ChrootManager.ChrootStatus st = new ChrootManager.ChrootStatus();
+            check(ChrootManager.parseUnifiedInspectOutput(stdout, "mock_su", st),
+                "parseUnifiedInspectOutput must return true on valid stdout");
+            check(st.hasRoot && "mock_su".equals(st.suPath) && "27.0:MAGISKSU".equals(st.suVersion),
+                "Parsed suPath/suVersion mismatch: " + st.suPath + " / " + st.suVersion);
+            check(st.rootfsExists && st.entryScriptExists, "rootfsExists and entryScriptExists must be true");
+            check("Debian GNU/Linux 12 (bookworm)".equals(st.debianPrettyName),
+                "Expected pretty name bookworm, got: " + st.debianPrettyName);
+            check(!st.rootfsSizeSummary.isEmpty(), "rootfsSizeSummary must be populated");
+            check(st.rootDesktopProbed && st.rootLxdeInstalled && !st.rootXfceInstalled && st.rootVncServerInstalled,
+                "Unified probe must populate LXDE + VNC desktop status");
+            check(st.phantomProbed && "false".equals(st.phantomMonitorFlag)
+                    && "2147483647".equals(st.phantomDeviceConfigMax),
+                "Unified probe must populate Phantom Process status fields");
+
+            // Verify DesktopManager and PhantomProcessManager reuse probed data with 0 extra su calls
+            SystemRequirements.Report mockReport = SystemRequirements.evaluateBaseChecks(
+                35, "15", "arm64-v8a", 8192, 4096, 20000, 64000,
+                true, true, true, st.suPath, st.suVersion, true, true);
+            mockReport.rootStatus = st;
+            DesktopManager.DesktopStatus ds = DesktopManager.inspectDesktopStatus(
+                null, mockReport, mockRoot.toString());
+            check(ds.rootLxdeInstalled && !ds.rootXfceInstalled && ds.rootVncServerInstalled,
+                "DesktopManager must reuse rootDesktopProbed without invoking su");
+
+            PhantomProcessManager.Status ps = PhantomProcessManager.inspectForApi(35, null, st);
+            check(ps.affectedApi && ps.monitoringDisabled && ps.knownMitigated,
+                "PhantomProcessManager must reuse phantomProbed without invoking su");
+
+            // Verify deep copy isolation of ChrootStatus.activeMounts
+            st.activeMounts.add("/mock/proc");
+            ChrootManager.ChrootStatus copy = st.copy();
+            copy.activeMounts.add("/mock/sys");
+            check(st.activeMounts.size() == 1 && copy.activeMounts.size() == 2,
+                "ChrootStatus.copy() must clone activeMounts list independently");
+
+            // Verify public cache/API methods remain intact
+            Class<?> ctxCls = Class.forName("android.content.Context");
+            check(Modifier.isPublic(ChrootManager.class.getMethod("clearSuCache").getModifiers()),
+                "ChrootManager.clearSuCache must be public");
+            check(Modifier.isPublic(ChrootManager.class.getMethod("invalidateStatusCache").getModifiers()),
+                "ChrootManager.invalidateStatusCache must be public");
+            check(Modifier.isPublic(ChrootManager.class.getMethod("inspectStatusCached",
+                String.class, String.class, boolean.class).getModifiers()),
+                "ChrootManager.inspectStatusCached must be public");
+            check(Modifier.isPublic(SystemRequirements.class.getMethod("runCheck",
+                ctxCls, TerminalSettings.class, boolean.class).getModifiers()),
+                "SystemRequirements.runCheck(Context, TerminalSettings, boolean) must be public");
+
+            // Verify canonical deduplication in buildSuCandidateList prevents duplicate Magisk su prompts
+            Path suDir = Files.createTempDirectory("dt-su-canon");
+            Path magiskTarget = suDir.resolve("magisk");
+            Path suLink = suDir.resolve("su");
+            try {
+                Files.write(magiskTarget, "#!/bin/sh\n".getBytes(StandardCharsets.UTF_8));
+                Files.createSymbolicLink(suLink, magiskTarget.getFileName());
+                List<String> cands = ChrootManager.buildSuCandidateList(suLink.toString(), suDir.toString());
+                check(!cands.isEmpty() && suLink.toString().equals(cands.get(0)),
+                    "Preferred su symlink must appear first in buildSuCandidateList");
+                String realTarget = magiskTarget.toRealPath().toString();
+                int canonHits = 0;
+                for (String c : cands) {
+                    if (c.startsWith("/")) {
+                        Path cp = Paths.get(c);
+                        if (Files.exists(cp) && realTarget.equals(cp.toRealPath().toString())) {
+                            canonHits++;
+                        }
+                    }
+                }
+                check(canonHits == 1,
+                    "PATH scan must deduplicate canonical su targets (expected 1, got " + canonHits + ")");
+            } finally {
+                Files.deleteIfExists(suLink);
+                Files.deleteIfExists(magiskTarget);
+                Files.deleteIfExists(suDir);
+            }
+        } finally {
+            Files.deleteIfExists(mockScript);
+            Files.deleteIfExists(mockRoot.resolve("bin/bash"));
+            Files.deleteIfExists(mockRoot.resolve("usr/bin/startlxde"));
+            Files.deleteIfExists(mockRoot.resolve("usr/bin/Xtigervnc"));
+            Files.deleteIfExists(mockRoot.resolve("etc/debian_version"));
+            Files.deleteIfExists(mockRoot.resolve("etc/os-release"));
+            Files.deleteIfExists(mockRoot.resolve("bin"));
+            Files.deleteIfExists(mockRoot.resolve("usr/bin"));
+            Files.deleteIfExists(mockRoot.resolve("usr"));
+            Files.deleteIfExists(mockRoot.resolve("etc"));
+            Files.deleteIfExists(mockRoot);
+        }
+
+        System.out.println("[PASS] Test 32: Single-shot unified su probe, root status TTL cache & zero-su Desktop/Phantom reuse");
     }
 
     private static String fetchText(String urlStr) throws Exception {

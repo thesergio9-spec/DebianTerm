@@ -112,7 +112,7 @@ DebianTerm/
 │   └── com/termux/x11/          # Puente X11 Nativo Lorie (CmdEntryPoint, ICmdEntryInterface, LorieView, MainActivity)
 ├── libs/                        # Bibliotecas JAR (annotation-1.5.0, xz-1.9)
 ├── jniLibs/                     # Binarios nativos arm64-v8a y armeabi-v7a (libtermux.so, libXlorie.so, PRoot)
-├── tests/                       # Suite de 31 pruebas unitarias en JVM (VerifyAll.java)
+├── tests/                       # Suite de 32 pruebas unitarias en JVM (VerifyAll.java)
 ├── setup-deps.sh                # Descarga componentes base Termux, JARs, libXlorie.so y PRoot (SHA-256)
 └── build.sh                     # Compilación completa (aapt2, javac, d8, zipalign, apksigner)
 ```
@@ -134,7 +134,7 @@ El APK firmado se genera en `build/DebianTerm-release.apk`.
 
 ## 🧪 Pruebas Unitarias
 
-La suite [VerifyAll.java](tests/VerifyAll.java) valida en JVM **31 pruebas clave** (`DECSET 2026`, modo Pan, redibujados sincronizados `>100 KB` y coalescencia de borrado, preservación de scroll `CSI 3 J` / 10,000 líneas, salida segura tras `exit` y sincronización de notificación Wake Lock, parser LXC/SHA-256, scripts `sh -n` y fallback `exec` Root, temas de color, requisitos, `TarExtractor`, PRoot, cierre suave, scripts gráficos XFCE4/LXDE, cliente RFB 3.8, sesiones, `setup-storage`, `PhantomProcessManager`, `TerminalSearch`, `SnippetManager`, `DebianDocumentsProvider`, `BackupManager` `.tar.gz`, Teclas Extra / Nerd Font TTF, `BootReceiver`, `SixelDecoder`, `TerminalEmulator` Sixel, contrato JNI/ELF X11 nativo integrado, orientación/resolución `Ajustar`, limpieza de procesos X11/VNC huérfanos + redimensión RFB en vivo y optimizaciones de energía/CPU con barrido `/proc` seguro ante `ESRCH`, pausa/reanudación RFB, cursor X11 adaptativo y `WifiLock` eficiente):
+La suite [VerifyAll.java](tests/VerifyAll.java) valida en JVM **32 pruebas clave** (`DECSET 2026`, modo Pan, redibujados sincronizados `>100 KB` y coalescencia de borrado, preservación de scroll `CSI 3 J` / 10,000 líneas, salida segura tras `exit` y sincronización de notificación Wake Lock, parser LXC/SHA-256, scripts `sh -n` y fallback `exec` Root, temas de color, requisitos, `TarExtractor`, PRoot, cierre suave, scripts gráficos XFCE4/LXDE, cliente RFB 3.8, sesiones, `setup-storage`, `PhantomProcessManager`, `TerminalSearch`, `SnippetManager`, `DebianDocumentsProvider`, `BackupManager` `.tar.gz`, Teclas Extra / Nerd Font TTF, `BootReceiver`, `SixelDecoder`, `TerminalEmulator` Sixel, contrato JNI/ELF X11 nativo integrado, orientación/resolución `Ajustar`, limpieza de procesos X11/VNC huérfanos + redimensión RFB en vivo, optimizaciones de energía/CPU con barrido `/proc` seguro ante `ESRCH`, pausa/reanudación RFB, cursor X11 adaptativo y `WifiLock` eficiente, y sonda `su` unificada de 1 sola llamada con deduplicación canónica y caché TTL):
 
 ```bash
 javac -encoding UTF-8 -cp build/classes:/opt/android-sdk/android.jar:libs/xz-1.9.jar -d build/test-classes tests/VerifyAll.java

@@ -103,6 +103,9 @@ public final class SystemRequirements {
         }
     }
 
+    private static volatile boolean sCachedMirrorReachable = false;
+    private static volatile long sCachedMirrorAtMs = 0L;
+
     private SystemRequirements() {}
 
     public static Report evaluateBaseChecks(
@@ -269,6 +272,10 @@ public final class SystemRequirements {
     }
 
     public static Report runCheck(Context context, TerminalSettings settings) {
+        return runCheck(context, settings, true);
+    }
+
+    public static Report runCheck(Context context, TerminalSettings settings, boolean forceRefresh) {
         String primaryAbi = (Build.SUPPORTED_ABIS != null && Build.SUPPORTED_ABIS.length > 0)
             ? Build.SUPPORTED_ABIS[0]
             : "arm64-v8a";
@@ -289,11 +296,23 @@ public final class SystemRequirements {
         long totalStorageMb = stat.getTotalBytes() / (1024L * 1024L);
 
         boolean hasNetwork = checkNetworkAvailable(context);
-        boolean mirrorReachable = hasNetwork && checkMirrorReachable();
+        boolean mirrorReachable = false;
+        if (hasNetwork) {
+            long now = System.currentTimeMillis();
+            if (!forceRefresh && sCachedMirrorAtMs > 0L
+                    && (now - sCachedMirrorAtMs) < ChrootManager.ROOT_STATUS_CACHE_TTL_MS) {
+                mirrorReachable = sCachedMirrorReachable;
+            } else {
+                mirrorReachable = checkMirrorReachable();
+                sCachedMirrorReachable = mirrorReachable;
+                sCachedMirrorAtMs = now;
+            }
+        }
 
-        ChrootManager.ChrootStatus rootSt = ChrootManager.inspectStatus(
+        ChrootManager.ChrootStatus rootSt = ChrootManager.inspectStatusCached(
             settings.getChrootPath(),
-            settings.getEntryScriptPath()
+            settings.getEntryScriptPath(),
+            forceRefresh
         );
         ProotManager.ProotStatus prootSt = ProotManager.inspectStatus(context);
 
@@ -320,7 +339,7 @@ public final class SystemRequirements {
         boolean ignoringDoze = DebianTermService.isIgnoringBatteryOptimizations(context);
         boolean notifOk = DebianTermService.areNotificationsEnabled(context);
         boolean storageGranted = ProotManager.hasSharedStorageAccess(context);
-        PhantomProcessManager.Status phantomSt = PhantomProcessManager.inspect(context, report.hasRoot);
+        PhantomProcessManager.Status phantomSt = PhantomProcessManager.inspect(context, rootSt);
 
         List<CheckItem> fullItems = new ArrayList<>(report.items);
         if (deskSt.builtInX11Available) {

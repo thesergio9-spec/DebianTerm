@@ -40,6 +40,19 @@ public final class PhantomProcessManager {
     private PhantomProcessManager() {}
 
     public static Status inspect(Context context, boolean hasRoot) {
+        if (!hasRoot) {
+            return inspect(context, (ChrootManager.ChrootStatus) null);
+        }
+        ChrootManager.ChrootStatus unprobed = new ChrootManager.ChrootStatus();
+        unprobed.hasRoot = true;
+        return inspect(context, unprobed);
+    }
+
+    public static Status inspect(Context context, ChrootManager.ChrootStatus rootStatus) {
+        return inspectForApi(Build.VERSION.SDK_INT, context, rootStatus);
+    }
+
+    public static Status inspectForApi(int apiLevel, Context context, ChrootManager.ChrootStatus rootStatus) {
         String monitorFlag = null;
         String activityConstants = null;
         String deviceConfigMax = null;
@@ -55,30 +68,45 @@ public final class PhantomProcessManager {
             }
         }
 
-        if (hasRoot && Build.VERSION.SDK_INT >= MIN_AFFECTED_API) {
-            String cmd =
-                "settings get global settings_enable_monitor_phantom_procs 2>/dev/null; " +
-                "echo '---PHANTOM---'; " +
-                "/system/bin/device_config get activity_manager max_phantom_processes 2>/dev/null || " +
-                "device_config get activity_manager max_phantom_processes 2>/dev/null; " +
-                "echo '---PHANTOM---'; " +
-                "settings get global activity_manager_constants 2>/dev/null";
-            ChrootManager.ExecResult res = ChrootManager.execSu(cmd, 5);
-            if (res.stdout != null && !res.stdout.isEmpty()) {
-                String[] parts = res.stdout.split("---PHANTOM---", -1);
-                if (parts.length > 0 && isMeaningful(parts[0])) {
-                    monitorFlag = parts[0].trim();
+        if (rootStatus != null && rootStatus.hasRoot && apiLevel >= MIN_AFFECTED_API) {
+            if (rootStatus.phantomProbed) {
+                if (isMeaningful(rootStatus.phantomMonitorFlag)) {
+                    monitorFlag = rootStatus.phantomMonitorFlag.trim();
                 }
-                if (parts.length > 1 && isMeaningful(parts[1])) {
-                    deviceConfigMax = parts[1].trim();
+                if (isMeaningful(rootStatus.phantomDeviceConfigMax)) {
+                    deviceConfigMax = rootStatus.phantomDeviceConfigMax.trim();
                 }
-                if (parts.length > 2 && isMeaningful(parts[2])) {
-                    activityConstants = parts[2].trim();
+                if (isMeaningful(rootStatus.phantomActivityConstants)) {
+                    activityConstants = rootStatus.phantomActivityConstants.trim();
+                }
+            } else {
+                String cmd =
+                    "settings get global settings_enable_monitor_phantom_procs 2>/dev/null; " +
+                    "echo '---PHANTOM---'; " +
+                    "/system/bin/device_config get activity_manager max_phantom_processes 2>/dev/null || " +
+                    "device_config get activity_manager max_phantom_processes 2>/dev/null; " +
+                    "echo '---PHANTOM---'; " +
+                    "settings get global activity_manager_constants 2>/dev/null";
+                String suBin = (rootStatus.suPath != null && !rootStatus.suPath.isEmpty())
+                    ? rootStatus.suPath
+                    : ChrootManager.resolveWorkingSuPath();
+                ChrootManager.ExecResult res = ChrootManager.execWithBinary(suBin, false, cmd, 5);
+                if (res.stdout != null && !res.stdout.isEmpty()) {
+                    String[] parts = res.stdout.split("---PHANTOM---", -1);
+                    if (parts.length > 0 && isMeaningful(parts[0])) {
+                        monitorFlag = parts[0].trim();
+                    }
+                    if (parts.length > 1 && isMeaningful(parts[1])) {
+                        deviceConfigMax = parts[1].trim();
+                    }
+                    if (parts.length > 2 && isMeaningful(parts[2])) {
+                        activityConstants = parts[2].trim();
+                    }
                 }
             }
         }
 
-        return parsePhantomStatus(Build.VERSION.SDK_INT, monitorFlag, activityConstants, deviceConfigMax);
+        return parsePhantomStatus(apiLevel, monitorFlag, activityConstants, deviceConfigMax);
     }
 
     public static Status parsePhantomStatus(
@@ -128,7 +156,9 @@ public final class PhantomProcessManager {
             "fi; " +
             "settings put global activity_manager_constants max_phantom_processes=" + TARGET_MAX_LIMIT + " 2>/dev/null || true; " +
             "echo PHANTOM_FIX_OK";
-        return ChrootManager.execSu(cmd, 8);
+        ChrootManager.ExecResult res = ChrootManager.execSu(cmd, 8);
+        ChrootManager.invalidateStatusCache();
+        return res;
     }
 
     public static String getAdbFixCommands() {

@@ -131,7 +131,7 @@ DebianTerm/
 │   └── com/termux/x11/              # Built-in Lorie X11 bridge (CmdEntryPoint, ICmdEntryInterface, LorieView, MainActivity)
 ├── libs/                            # JAR dependencies (annotation-1.5.0, xz-1.9)
 ├── jniLibs/                         # arm64-v8a & armeabi-v7a (libtermux.so, libXlorie.so, PRoot binaries)
-├── tests/                           # 31 pure-JVM verification tests (VerifyAll.java)
+├── tests/                           # 32 pure-JVM verification tests (VerifyAll.java)
 ├── setup-deps.sh                    # Fetches Termux engine, JARs, libXlorie.so & SHA-256 verified PRoot binaries
 └── build.sh                         # Compiles, links, aligns & signs APK (aapt2, d8, apksigner)
 ```
@@ -158,7 +158,7 @@ The signed APK is output at `build/DebianTerm-release.apk`.
 
 ## 🧪 Unit Tests
 
-[tests/VerifyAll.java](tests/VerifyAll.java) runs **31 standalone JVM tests** covering `DECSET 2026`, anti-rewind Pan mode, large >100 KB sync redraw & erase-settle coalescing, `CSI 3 J` scrollback preservation (10,000-row transcript), safe last-shell app exit & Wake Lock notification sync, live LXC image parsing, root script `sh -n` validation & root `exec` fallback, color schemes, system requirements checks, `TarExtractor` PAX/symlinks/traversal safety, PRoot launcher validation, graceful shutdown, desktop scripts, simulated RFB 3.8 VNC server round-trips, session numbering reuse, `setup-storage`, `PhantomProcessManager`, `TerminalSearch`, `SnippetManager`, `DebianDocumentsProvider` path safety, `BackupManager` `.tar.gz` round-trips, `ExtraKeysBarView`/Nerd Font TTF validation, `BootReceiver`, `SixelDecoder`, `TerminalEmulator` Sixel rendering, built-in native X11 JNI contract & ELF binaries, desktop orientation/fit-to-screen resolution (`X11` & `VNC`), orphan X11/VNC sweeper + live RFB `ExtendedDesktopSize` resizing, and power/CPU optimizations (ESRCH-safe `/proc` sweeper, RFB background pause/resume, adaptive X11 cursor & power-efficient `WifiLock`):
+[tests/VerifyAll.java](tests/VerifyAll.java) runs **32 standalone JVM tests** covering `DECSET 2026`, anti-rewind Pan mode, large >100 KB sync redraw & erase-settle coalescing, `CSI 3 J` scrollback preservation (10,000-row transcript), safe last-shell app exit & Wake Lock notification sync, live LXC image parsing, root script `sh -n` validation & root `exec` fallback, color schemes, system requirements checks, `TarExtractor` PAX/symlinks/traversal safety, PRoot launcher validation, graceful shutdown, desktop scripts, simulated RFB 3.8 VNC server round-trips, session numbering reuse, `setup-storage`, `PhantomProcessManager`, `TerminalSearch`, `SnippetManager`, `DebianDocumentsProvider` path safety, `BackupManager` `.tar.gz` round-trips, `ExtraKeysBarView`/Nerd Font TTF validation, `BootReceiver`, `SixelDecoder`, `TerminalEmulator` Sixel rendering, built-in native X11 JNI contract & ELF binaries, desktop orientation/fit-to-screen resolution (`X11` & `VNC`), orphan X11/VNC sweeper + live RFB `ExtendedDesktopSize` resizing, power/CPU optimizations (ESRCH-safe `/proc` sweeper, RFB background pause/resume, adaptive X11 cursor & power-efficient `WifiLock`), and single-shot unified `su` probing with canonical path deduplication & TTL root caching:
 
 ```bash
 javac -encoding UTF-8 -cp build/classes:/opt/android-sdk/android.jar:libs/xz-1.9.jar -d build/test-classes tests/VerifyAll.java

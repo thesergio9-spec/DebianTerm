@@ -200,6 +200,7 @@ public final class ChrootInstaller {
             listener.onLog("ERROR: " + msg);
             return new InstallResult(false, msg);
         } finally {
+            ChrootManager.invalidateStatusCache();
             if (cacheTarXz.exists()) {
                 //noinspection ResultOfMethodCallIgnored
                 cacheTarXz.delete();
@@ -283,6 +284,7 @@ public final class ChrootInstaller {
             listener.onLog("ERROR: " + msg);
             return new InstallResult(false, msg);
         } finally {
+            ChrootManager.invalidateStatusCache();
             if (cacheTarXz.exists()) {
                 //noinspection ResultOfMethodCallIgnored
                 cacheTarXz.delete();
