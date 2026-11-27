@@ -5,8 +5,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/thesergio9-spec/DebianTerm/releases/tag/v2.5.2">
-    <img src="https://img.shields.io/badge/release-v2.5.2-D70A53?style=flat-square" alt="Release v2.5.2">
+  <a href="https://github.com/thesergio9-spec/DebianTerm/releases/tag/v2.5.3">
+    <img src="https://img.shields.io/badge/release-v2.5.3-D70A53?style=flat-square" alt="Release v2.5.3">
   </a>
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/license-GPLv3-blue?style=flat-square" alt="License GPLv3">
@@ -17,7 +17,7 @@
   </a>
 </p>
 
-**DebianTerm** (`v2.5.2`) is a complete **Debian 12 (Bookworm) installer, terminal emulator, and hybrid graphical desktop** for Android built around Termux's terminal engine (`terminal-emulator` and `terminal-view`). It launches with an **automatic device requirements check**, a **Terminal (CLI) vs. Graphical Desktop** selector, and **two independent execution paths**:
+**DebianTerm** (`v2.5.3`) is a complete **Debian 12 (Bookworm) installer, terminal emulator, and hybrid graphical desktop** for Android built around Termux's terminal engine (`terminal-emulator` and `terminal-view`). It launches with an **automatic device requirements check**, a **Terminal (CLI) vs. Graphical Desktop** selector, and **two independent execution paths**:
 
 1. **Path 1 — Rooted (Native Chroot):** native Linux kernel performance and real mounts for Magisk, KernelSU, or APatch devices.
 2. **Path 2 — Rootless (Bundled PRoot):** embedded `PRoot` binaries (`arm64-v8a` and `armeabi-v7a`) packaged directly inside the APK — **100% standalone, no Termux app required**.
@@ -46,7 +46,7 @@ DebianTerm runs under its own application ID (`com.debianchroot.term`), safely c
 
 Grab the latest signed release APK directly from GitHub Releases:
 
-- **[DebianTerm.apk (v2.5.2)](https://github.com/thesergio9-spec/DebianTerm/releases/download/v2.5.2/DebianTerm.apk)**
+- **[DebianTerm.apk (v2.5.3)](https://github.com/thesergio9-spec/DebianTerm/releases/download/v2.5.3/DebianTerm.apk)**
 
 ---
 
@@ -61,13 +61,13 @@ DebianTerm is open source, ad-free, and contains zero analytics or telemetry:
 
 ---
 
-## 🚀 Key Features (`v2.5.2`)
+## 🚀 Key Features (`v2.5.3`)
 
 ### 1. Startup Requirements & Mode Selector Dashboard
 On startup, `SystemRequirements` evaluates device readiness before installing or launching Debian:
 - **Android & CPU:** Android 7.0+ (`API 24+`), `arm64-v8a` / `armeabi-v7a` binary checks.
 - **RAM, Storage & Mirror Check:** verifies free memory, storage headroom, and live HTTPS connectivity to `images.linuxcontainers.org`.
-- **Dual Mode Detection:** probes Magisk / KernelSU / APatch (`su`), bundled PRoot binaries, Doze exemption status, Notification permissions (Android 13+), Shared Storage readiness, and **Android 12+ Phantom Process Killer**.
+- **Dual Mode Detection:** probes Magisk / KernelSU / APatch (`su`) via a single unified root check with canonical path deduplication & 60s TTL cache (eliminating repeated Magisk superuser toasts on startup/resume), bundled PRoot binaries, Doze exemption status, Notification permissions (Android 13+), Shared Storage readiness, and **Android 12+ Phantom Process Killer**.
 - **Auto-Enter Switch:** optional toggle (**"Entrar automáticamente a Debian 12 al iniciar"**) that respects your chosen CLI or Graphical startup mode.
 
 ### 2. Hybrid Graphical Desktop (XFCE4 / LXDE)

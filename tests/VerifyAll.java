@@ -1474,8 +1474,8 @@ public final class VerifyAll {
         }
 
         String manifest = new String(Files.readAllBytes(Paths.get("AndroidManifest.xml")), StandardCharsets.UTF_8);
-        check(manifest.contains("android:versionCode=\"15\"") && manifest.contains("android:versionName=\"2.5.2\""),
-            "AndroidManifest must bump versionCode=15 / versionName=2.5.2");
+        check(manifest.contains("android:versionCode=\"16\"") && manifest.contains("android:versionName=\"2.5.3\""),
+            "AndroidManifest must bump versionCode=16 / versionName=2.5.3");
         check(manifest.contains("|density|") && manifest.contains("fontScale")
                 && manifest.contains("layoutDirection") && manifest.contains("screenSize"),
             "MainActivity configChanges must cover density/fontScale/layoutDirection/screenSize");
